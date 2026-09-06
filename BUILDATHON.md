@@ -2,7 +2,7 @@
 
 ## One-sentence summary
 
-`entire graph gate` turns a change set into a verified test plan: it resolves each changed entity to a graph symbol, walks inbound `CALLS` edges transitively to find which tests reach it, emits the narrowest `go test -run '^(A|B)$'` command for that set, and raises `UNCOVERED` for changed symbols that other code depends on but that no test reaches.
+`entire graph gate` turns a change set into a verified test plan: it resolves each changed entity to a graph symbol, walks inbound `CALLS` edges transitively to find which tests reach it, emits the narrowest command for that set in the repository's own test runner (`go test -run`, `python -m pytest -k`), grades how good the evidence behind each answer actually is, and raises `UNCOVERED` for changed symbols that other code depends on but that no test reaches.
 
 **Team:** Abhinav Singh (OfficialAbhinavSingh), Yash Virulkar (Viscous106)
 **Fork:** https://github.com/Viscous106/entire-graph
@@ -85,6 +85,96 @@ The diff speaks entity names; the graph speaks symbol IDs. Matching on name alon
 **Report, never drop.** Three reasons are first-class: `not-found`, `ambiguous`, `module-scope` (`internal/sem/gate.go:47-51`). A change the graph cannot place is precisely where a coverage claim would be silently wrong, so it stays visible in the output. This is the same principle as the `UNCOVERED` alarm: a tool built to remove silence must not introduce its own.
 
 Verified against real upstream commits: `forEachRelation` in `internal/sem/provider.go` came back genuinely ambiguous — the rule fires on real code, not only on fixtures.
+
+## What the graph is used for, end to end
+
+The product consumes exactly two graph facts, and there is no second source for either.
+
+**Fact one — what changed, as symbols.** `sem.AnalyzeGitRange` reports `runIndexedStreamingPipeline`
+was added, not "lines 14-30 of provider_parallel_stream.go changed". A line diff cannot be joined to
+a call graph; an entity change can.
+
+**Fact two — who reaches those symbols.** The inbound `CALLS`/`TESTS` edges. Run the graph directly
+and this is the raw input:
+
+```
+$ entire graph neighbors --repo . --symbol runIndexedStreamingPipeline --relation CALLS --direction in
+forEachRelation                                            internal/sem/provider.go
+TestIndexedStreamingPipelineBoundsAndOrdersLargeOutput     internal/sem/provider_parallel_stream_test.go
+TestIndexedStreamingPipelineStopsAndJoinsBlockedProducers  internal/sem/provider_parallel_stream_test.go
+```
+
+That edge list is the whole input. Gate turns it into a decision:
+
+```
+COVERED  runIndexedStreamingPipeline  provider_parallel_stream.go:14  [confirmed]
+  selected: TestIndexedStreamingPipelineBoundsAndOrdersLargeOutput  (edge -> confirmed, depth 1)
+  selected: TestIndexedStreamingPipelineStopsAndJoinsBlockedProducers  (edge -> confirmed, depth 1)
+```
+
+Every element traces back to a graph fact:
+
+| Output | The graph fact behind it |
+| --- | --- |
+| the symbol is in scope at all | `AnalyzeGitRange` reported it changed in `4afea0a..4172fb3` |
+| `COVERED` | a test appears in the inbound `CALLS` list |
+| *which* tests | those two names, from the edge list |
+| `[confirmed]` | the admitting route was a resolved edge, not a filename convention |
+| `go test -run '^(Test…\|Test…)$'` | composed from those names |
+
+Remove the graph and the feature does not degrade — it cannot exist. There is no other way to know
+which tests reach a changed symbol.
+
+**What gate adds on top of the edges.** The track requires more than raw graph output, and three
+things separate a decision from a dump:
+
+1. **Change-anchored.** `neighbors` requires you to already know the symbol to ask about. Gate
+   starts from `--base/--head` and finds the symbols itself.
+2. **Transitive and set-level.** The existing covering-test finder stops at one hop
+   (`search_covertest.go:456`) and names one test (`searchCoveringTestLimit = 1`). Gate walks two
+   hops and returns every test for every changed symbol as one runnable command.
+3. **It reports absence.** When the inbound list holds callers but no tests, the existing tooling
+   prints nothing, and silence is indistinguishable from never having asked. Gate says:
+
+```
+UNCOVERED  result  provider_parallel_stream.go:33  [unverified]
+  ! 581 dependents and no test reaches this (no path the graph can see)
+```
+
+581 symbols depend on that field and no test reaches it. The fact was in the graph the whole time;
+nothing surfaced it.
+
+## Verified on three repositories, three languages
+
+Gate reads a graph, so it is not specific to this repository or to Go. Run against unrelated
+projects on the same machine:
+
+| Repository | Language | Verdicts | Evidence | Command emitted |
+| --- | --- | --- | --- | --- |
+| this fork | Go | 5 changed | 1 `confirmed`, 4 `heuristic` | `go test ./internal/sem/` (widened) |
+| `scaler-content` | Python | 53 changed: 41 `COVERED`, 11 `UNCOVERED`, 1 `ISOLATED` | 2 `confirmed`, 39 `heuristic`, 12 `unverified` | `python -m pytest src/scaler_listen/ …` (widened) |
+| `githubStats` | JavaScript | 12 changed: 11 `UNCOVERED`, 1 `ISOLATED` | 12 `unverified` | none — no jest/vitest emitter in v1 |
+
+The Python run is the strongest evidence that the Curveball revision was necessary. Its selected
+tests break down by attribution route as:
+
+```
+mirror: 613     name: 15     edge: 2
+```
+
+**628 convention matches against 2 resolved edges.** Before grading landed, all 41 `COVERED`
+verdicts rendered identically and every one looked like structural proof. Now the two that are
+structural say `confirmed`, the rest say `heuristic`, and the emitted command widens because of it.
+
+The JavaScript run found a real defect in our own attribution, since fixed. `faker`, a fixture
+helper in `tests/pat-info.test.js`, was selected as the covering "test" for a changed handler,
+because attribution admits any symbol on a test-artifact path. A convention route must now satisfy
+the name convention as well, so such a symbol is counted as not reportable rather than presented as
+evidence. `pat-info` correctly reads `ISOLATED [unverified]`, and the same fix removed **255**
+falsely-reported helper selections on the Python repository — measured, not estimated.
+
+Both defects were found by running the product on real repositories rather than on its own
+fixtures, which is why the cross-language runs are part of the submission and not a footnote.
 
 ## Entire Graph findings and verification
 
@@ -181,12 +271,42 @@ reason to doubt.
 
 ## Checkpoint links and what each checkpoint proves
 
-Links to be filled in at submission. The four required milestones:
+All four are on `main` in the Entire mirror `entire://aws-ap-south-1.entire.io/gh/viscous106/entire-graph`.
+Inspect any of them with `entire checkpoint explain <id>`.
 
-1. **Intent and architecture.** Proves the idea was chosen against alternatives, not defaulted into: 13 candidates scored, `Priors` rejected for prior art and no corpus, intent-attestation demoted from headline to a flag because its verdicts are judgments rather than deterministically testable. Records L3 resolution as the open risk. — *link pending*
-2. **Last stable pre-Curveball.** Proves what ran, what did not, and what was unverified at the freeze point. — *link pending*
-3. **Curveball response.** Proves the constraint was received, an impact analysis was run before editing the affected area, and the smallest complete response was made and tested. — *link pending*
-4. **Final implementation and verification.** Proves the semantic diff of the submission, the adjudicated verdict, and the stated limits. — *link pending*
+| # | Milestone | Checkpoint | Commit |
+| --- | --- | --- | --- |
+| 1 | Intent and architecture | `1384714f6910` | `af889cf` — 11:29 |
+| 2 | Last stable pre-Curveball | *see note* | `01520bf` — 12:00 |
+| 3 | Curveball response | `ccbca9421d4e`, `1e82264bcb5a` | `3ce7209` — 12:28, `2466618` — 12:48 |
+| 4 | Final implementation and verification | `1e82264bcb5a` + `entire session attach` | `3774fea` |
+
+**1. Intent and architecture** (`1384714f6910` → `af889cf`). Proves the idea was chosen against
+alternatives rather than defaulted into: 13 candidates scored, `Priors` rejected for prior art and
+no corpus, intent-attestation demoted from headline to a flag because its verdicts are judgments
+rather than deterministically testable. Records L3 resolution as the open risk, which is exactly
+where the two real defects later appeared.
+
+**2. Last stable pre-Curveball** (`01520bf`, committed at 12:00 as the Curveball landed). Proves
+what ran and what did not at the freeze point: L0–L3, L6–L9 complete, and `gateReach` still the
+66-line stub returning `nil, false, false`, so every verdict was `UNCOVERED` or `ISOLATED` and the
+`COVERED` path had never executed. **Stated honestly: this commit carries no
+`Entire-Checkpoint` trailer.** The session that produced it was not recording at the time, and the
+trailer cannot be added afterwards without rewriting the commit. Checkpoints `1384714f6910` (11:29)
+and `ccbca9421d4e` (12:28) bracket it, and `docs/buildathon/HANDOVER.md` — committed in
+`3ce7209` and written at 12:10, before any Curveball code — states the freeze-point state in full,
+including the blocker.
+
+**3. Curveball response** — two checkpoints, in this order, and the order is the point.
+`ccbca9421d4e` → `3ce7209` carries `docs/buildathon/CURVEBALL.md` (the invalidated assumption,
+written before any code changed) and `docs/buildathon/curveball-impact.txt` (`entire graph impact`
+over the three affected symbols). **It contains no implementation.** `1e82264bcb5a` → `2466618` is
+the implementation that followed. The graph analysis is therefore provably before the edit, not
+reconstructed after it.
+
+**4. Final implementation and verification** (`3774fea`). Proves the shipped state: per-toolchain
+command emission, the two noise-filter defects found by running gate on its own commits, and the
+non-reportable-selection fix found by running it on a JavaScript repository.
 
 ## Setup, run and test instructions
 
@@ -207,9 +327,19 @@ entire graph gate --repo . --checkpoint <id>      # change set from an Entire Ch
 entire graph gate --repo . --base main --depth 1  # 1 or 2; default 2
 
 # tests for this feature
-go test ./internal/sem/ -run TestGate
-go test ./internal/cli/ -run TestGate
+go test ./internal/sem/ -run 'TestGate|TestReach'    # 53 tests
+go test ./internal/cli/ -run TestGate                # 23 tests
 ```
+
+To reproduce the cross-language runs, point `--repo` at any other project:
+
+```bash
+entire graph gate --repo /path/to/a/python/project --base HEAD~1
+entire graph gate --repo /path/to/a/javascript/project --base HEAD~1
+```
+
+Note `--base main` from `main` itself is an empty range and correctly reports `CHANGED 0 symbols`;
+use `--base HEAD~1` or an explicit `--base A --head B`.
 
 The exact CI gate this repository requires, in order:
 
@@ -230,7 +360,8 @@ Stated plainly, because a coverage tool that overstates itself is worse than non
 
 - **Static call resolution is heuristic.** Interface dispatch, reflection, table-driven registration and generated code can all hide a real test-to-symbol path. `UNCOVERED` means *"no path the graph can see"* — a prompt to check, never a proof that the symbol is untested (`internal/sem/gate.go:406-409`).
 - **Test selection is not coverage measurement.** A test that reaches a changed symbol may not assert anything about the changed behaviour. Reachability bounds what *can* break; it does not confirm what *is* checked.
-- **Go-only command emission in v1.** `gateGoTestCommand` (`internal/cli/gate.go:241`) emits `go test -run`. Other toolchains get the full analysis — verdicts, evidence chains, gaps — but no runnable command. Names `go test -run` cannot match are dropped rather than emitted, because a command that silently selects nothing reads exactly like a green run of everything (`internal/cli/gate.go:236-240`).
+- **Two runners in v1: Go and pytest.** Commands are derived per toolchain from the changed files (`gateToolchains`, `internal/cli/gate.go`), and a build manifest must exist on disk before one is emitted — the only evidence that a given runner is the one the project uses. jest/vitest, cargo, maven and gradle repositories get the full analysis (verdicts, routes, evidence grades, gaps) and no command, which is deliberate: names a runner cannot match are dropped rather than emitted, because a command that silently selects nothing reads exactly like a green run of everything.
+- **A test-file helper is not a covering test.** Attribution admits any symbol on a test-artifact path, so a fixture helper arrives looking like a test case. A convention route (mirror, name) must therefore also satisfy the name convention; a resolved edge is kept regardless, because the graph saw the call. Symbols dropped this way are counted, not hidden.
 - **`TESTS` edges require profile `full`.** At other profiles one of the three evidence routes is missing; the output says so via `tests_relation_available` rather than degrading quietly.
 - **Fan-out is capped** at 512 inbound edges per level (`internal/sem/gate.go:64`). When the cap bites, the result is marked `Truncated` and the text renderer prints a warning (`internal/cli/gate.go:375-377`) — a shortened list that did not say it was shortened would read as "no more tests exist".
 - **Partiality is scoped to the files the change set touches.** Reachability walks *inbound* edges, so a parse failure in an unchanged file elsewhere can still hide a caller. That case is not marked `partial` — but it is not silent either: the verdict still carries `unverified` or `heuristic`, and heuristic-only evidence widens the command on its own. The tool degrades toward running more tests, never fewer.
