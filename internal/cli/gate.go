@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -169,7 +171,7 @@ func runGate(ctx context.Context, opts Options, args []string) error {
 		encoder.SetEscapeHTML(false)
 		return encoder.Encode(result)
 	}
-	writeGateText(opts.Stdout, result)
+	writeGateText(opts.Stdout, result, gateDetectManifests(repo, result))
 	if !flags.Run {
 		return nil
 	}
@@ -183,18 +185,34 @@ func runGate(ctx context.Context, opts Options, args []string) error {
 // adds is the selection — verify has always been able to run a command, it just had no way to know
 // which one this change needed.
 func runGateSelection(ctx context.Context, opts Options, repo string, result sem.GateResult) error {
-	command := gateGoTestCommand(gateAllSelectedTests(result))
-	if command == "" {
-		fmt.Fprint(opts.Stdout, "\nNothing to run: no selected test is executable by go test.\n")
+	commands := gateRunnableCommands(gateDetectManifests(repo, result), result)
+	if len(commands) == 0 {
+		fmt.Fprint(opts.Stdout, "\nNothing to run: no selected test is executable by a known runner.\n")
 		return nil
 	}
-	output, exitCode, err := runVerifyCommands(ctx, repo, verifyFlags{Test: command, MaxBytes: verifyDefaultMaxBytes})
-	if err != nil {
-		return err
+	for _, command := range commands {
+		output, exitCode, err := runVerifyCommands(ctx, repo, verifyFlags{Test: command, MaxBytes: verifyDefaultMaxBytes})
+		if err != nil {
+			return err
+		}
+		results, _, parsed := parseVerifyOutput(output)
+		if len(commands) > 1 {
+			fmt.Fprintf(opts.Stdout, "\n%s\n", termsafe.Line(command))
+		}
+		fmt.Fprintf(opts.Stdout, "\n%s\n", termsafe.Line(gateRunSummary(results, parsed, exitCode)))
 	}
-	results, _, parsed := parseVerifyOutput(output)
-	fmt.Fprintf(opts.Stdout, "\n%s\n", termsafe.Line(gateRunSummary(results, parsed, exitCode)))
 	return nil
+}
+
+// gateRunnableCommands is the command list --run executes: exactly what the VERIFY lines printed,
+// so what is shown and what is run cannot drift apart.
+func gateRunnableCommands(manifests []string, result sem.GateResult) []string {
+	plans := gateVerifyPlans(manifests, result)
+	commands := make([]string, 0, len(plans))
+	for _, plan := range plans {
+		commands = append(commands, plan.Command)
+	}
+	return commands
 }
 
 // gateRunSummary states the outcome of running the selection, and never more than was measured.
@@ -227,51 +245,183 @@ func gateRunSummary(results verifyResults, parsed bool, exitCode int) string {
 	return summary
 }
 
-// gateGoTestCommand composes one command covering the whole selection.
+// gateToolchain describes how one language's tests are named, selected and run.
 //
-// The existing emitter names a single test (deriveSearchVerifyGo, search_verify.go:919). A change
-// set selects a set, so the pattern is an alternation over every selected name, sorted so the same
-// selection always renders the same command.
+// gate's ANALYSIS is language-agnostic — reachability, attribution and grading work on anything the
+// provider parses semantically, and running against a pytest repository selected Python tests
+// through the same three routes. Only the emitted command is language-specific, so that is the one
+// place a toolchain table is needed.
+type gateToolchain struct {
+	name string
+	// manifests are the build files whose presence means the repository is run by this toolchain.
+	// Without one there is no evidence, and no command is emitted.
+	manifests []string
+	// sourceSuffix selects which changed symbols this toolchain is responsible for.
+	sourceSuffix string
+	// runnable reports whether a selected test's name is one the runner can actually be filtered
+	// to. A command naming something the runner cannot match selects nothing, and a green run of
+	// nothing reads exactly like a green run of everything.
+	runnable func(string) bool
+	// narrow builds the filtered command for a set of test names, already sorted and deduplicated.
+	narrow func(names []string) string
+	// widened builds the fallback over the directories holding the changed code.
+	widened func(dirs []string) string
+}
+
+var gateToolchains = []gateToolchain{
+	{
+		name:         "go",
+		manifests:    []string{"go.mod"},
+		sourceSuffix: ".go",
+		runnable:     func(name string) bool { return strings.HasPrefix(name, "Test") },
+		narrow: func(names []string) string {
+			return "go test -run '^(" + strings.Join(names, "|") + ")$' ./..."
+		},
+		widened: func(dirs []string) string {
+			return "go test " + strings.Join(gatePrefixDirs(dirs, "./", "/"), " ")
+		},
+	},
+	{
+		name:         "pytest",
+		manifests:    []string{"pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg"},
+		sourceSuffix: ".py",
+		runnable:     func(name string) bool { return strings.HasPrefix(name, "test") },
+		// -k matches on test name rather than a ::node id, so a parametrised case or a method on a
+		// test class still matches without gate having to reconstruct its full id.
+		narrow: func(names []string) string {
+			return "python -m pytest -k '" + strings.Join(names, " or ") + "'"
+		},
+		widened: func(dirs []string) string {
+			return "python -m pytest " + strings.Join(gatePrefixDirs(dirs, "", "/"), " ")
+		},
+	},
+}
+
+// gatePrefixDirs renders directory arguments in the shape one runner expects.
+func gatePrefixDirs(dirs []string, prefix, suffix string) []string {
+	rendered := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		rendered = append(rendered, prefix+dir+suffix)
+	}
+	return rendered
+}
+
+// gateDetectManifests reports which build manifests actually exist in the repository.
 //
-// Names go test cannot run are dropped rather than emitted: `-run` only matches functions named
-// Test*, so including anything else would produce a command that silently selects nothing — and a
-// green run of nothing reads exactly like a green run of everything. When nothing runnable is
-// left, no command is emitted at all. Falling back to the whole suite would answer a question the
-// caller did not ask; "run everything" is the state they were already in.
-func gateGoTestCommand(tests []sem.GateSelectedTest) string {
+// This is a filesystem question, so it belongs here rather than in sem.Gate, which is pure. Two
+// earlier attempts were wrong and are worth recording: the snapshot's file list does not contain
+// go.mod at all (the provider emits file records only for languages it parses), and it DOES contain
+// package.json and pom.xml belonging to this repository's own test fixtures — so a snapshot-derived
+// answer both missed the real toolchain and invented two false ones.
+//
+// Each changed file's ancestors are walked, the way deriveSearchVerifySuiteCommand does, so a
+// module or pytest config in a parent directory still identifies the toolchain.
+func gateDetectManifests(repo string, result sem.GateResult) []string {
 	seen := map[string]bool{}
-	names := make([]string, 0, len(tests))
-	for _, test := range tests {
-		if !strings.HasPrefix(test.Name, "Test") || seen[test.Name] {
+	dirs := map[string]bool{"": true}
+	for _, changed := range result.Changed {
+		for dir := path.Dir(changed.FilePath); dir != "." && dir != "/" && dir != ""; dir = path.Dir(dir) {
+			dirs[dir] = true
+		}
+	}
+	for _, toolchain := range gateToolchains {
+		for _, name := range toolchain.manifests {
+			for dir := range dirs {
+				if _, err := os.Stat(filepath.Join(repo, filepath.FromSlash(dir), name)); err == nil {
+					seen[name] = true
+					break
+				}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// gateVerifyPlan is one runnable command and, when it was widened, the reason it was.
+type gateVerifyPlan struct {
+	Toolchain string
+	Command   string
+	Why       string
+}
+
+// gateVerifyPlans derives one command per toolchain the change set touches.
+//
+// A mixed repository gets one command each rather than a single command that is wrong for one of
+// them; a repository with no matching manifest gets none, because the presence of a manifest is the
+// only evidence that a given runner is the one this project uses.
+func gateVerifyPlans(manifests []string, result sem.GateResult) []gateVerifyPlan {
+	plans := make([]gateVerifyPlan, 0, len(gateToolchains))
+	for _, toolchain := range gateToolchains {
+		if !gateHasManifest(manifests, toolchain.manifests) {
 			continue
 		}
-		seen[test.Name] = true
-		names = append(names, test.Name)
+		changed := gateChangedFor(result, toolchain)
+		if len(changed) == 0 {
+			continue
+		}
+		reason := gateWidenReason(result, changed)
+		if reason == "" {
+			if command := gateNarrowCommand(changed, toolchain); command != "" {
+				plans = append(plans, gateVerifyPlan{Toolchain: toolchain.name, Command: command})
+			}
+			continue
+		}
+		if command := gateWidenedCommand(changed, toolchain); command != "" {
+			plans = append(plans, gateVerifyPlan{Toolchain: toolchain.name, Command: command, Why: reason})
+		}
+	}
+	return plans
+}
+
+// gateHasManifest reports whether any of a toolchain's manifests was indexed.
+func gateHasManifest(present, wanted []string) bool {
+	for _, candidate := range wanted {
+		for _, name := range present {
+			if name == candidate {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// gateChangedFor selects the changed symbols a toolchain is responsible for.
+func gateChangedFor(result sem.GateResult, toolchain gateToolchain) []sem.GateChangedSymbol {
+	changed := make([]sem.GateChangedSymbol, 0, len(result.Changed))
+	for _, symbol := range result.Changed {
+		if strings.HasSuffix(symbol.FilePath, toolchain.sourceSuffix) {
+			changed = append(changed, symbol)
+		}
+	}
+	return changed
+}
+
+// gateNarrowCommand composes one command covering the whole selection for a toolchain.
+func gateNarrowCommand(changed []sem.GateChangedSymbol, toolchain gateToolchain) string {
+	seen := map[string]bool{}
+	names := make([]string, 0)
+	for _, symbol := range changed {
+		for _, test := range symbol.Tests {
+			if !toolchain.runnable(test.Name) || seen[test.Name] {
+				continue
+			}
+			seen[test.Name] = true
+			names = append(names, test.Name)
+		}
 	}
 	if len(names) == 0 {
 		return ""
 	}
 	sort.Strings(names)
-	return "go test -run '^(" + strings.Join(names, "|") + ")$' ./..."
-}
-
-// gateVerifyCommand chooses between the narrow selection and a widened fallback, and says why
-// when it widens.
-//
-// Returns ("", "") when there is nothing runnable, preserving the existing behaviour that no
-// command at all is better than one which silently selects nothing.
-func gateVerifyCommand(result sem.GateResult) (command, why string) {
-	narrow := gateGoTestCommand(gateAllSelectedTests(result))
-
-	reason := gateWidenReason(result)
-	if reason == "" {
-		return narrow, ""
-	}
-	widened := gateWidenedCommand(result)
-	if widened == "" {
-		return narrow, ""
-	}
-	return widened, reason
+	return toolchain.narrow(names)
 }
 
 // gateWidenReason reports why the narrow command cannot be trusted, or "" when it can.
@@ -279,11 +429,11 @@ func gateVerifyCommand(result sem.GateResult) (command, why string) {
 // Partiality is checked first because it is the stronger statement: the input itself was not whole,
 // so nothing computed from it is safe to narrow on. Heuristic-only evidence is the second case —
 // the analysis was complete, but what it found is a naming convention rather than a resolved call.
-func gateWidenReason(result sem.GateResult) string {
+func gateWidenReason(result sem.GateResult, scope []sem.GateChangedSymbol) string {
 	if result.Partial {
 		return "analysis over the changed files was incomplete, so a narrow selection could skip what the parser missed"
 	}
-	for _, changed := range result.Changed {
+	for _, changed := range scope {
 		if len(changed.Tests) > 0 && changed.Evidence == sem.GateEvidenceHeuristic {
 			return "the only evidence for " + changed.Name +
 				" is a naming convention, not a resolved call, so a narrow selection asserts more than the graph found"
@@ -303,37 +453,25 @@ func gateWidenReason(result sem.GateResult) string {
 // `go test ./src/... ./scripts/`, a command that cannot run at all. That is a worse failure than
 // the narrow emitter's, which already refuses to name tests `go test -run` cannot match. A mixed
 // repository still keeps its Go half rather than losing the command entirely.
-func gateWidenedCommand(result sem.GateResult) string {
+func gateWidenedCommand(changed []sem.GateChangedSymbol, toolchain gateToolchain) string {
 	seen := map[string]bool{}
-	dirs := make([]string, 0, len(result.Changed))
-	for _, changed := range result.Changed {
-		if !strings.HasSuffix(changed.FilePath, ".go") {
-			continue
-		}
+	dirs := make([]string, 0, len(changed))
+	for _, changed := range changed {
 		dir := path.Dir(changed.FilePath)
 		if dir == "." || dir == "" || seen[dir] {
 			continue
 		}
 		seen[dir] = true
-		dirs = append(dirs, "./"+dir+"/")
+		dirs = append(dirs, dir)
 	}
 	if len(dirs) == 0 {
 		return ""
 	}
 	sort.Strings(dirs)
-	return "go test " + strings.Join(dirs, " ")
+	return toolchain.widened(dirs)
 }
 
-// gateAllSelectedTests flattens every per-symbol selection into one set for the command.
-func gateAllSelectedTests(result sem.GateResult) []sem.GateSelectedTest {
-	var all []sem.GateSelectedTest
-	for _, changed := range result.Changed {
-		all = append(all, changed.Tests...)
-	}
-	return all
-}
-
-func writeGateText(out io.Writer, result sem.GateResult) {
+func writeGateText(out io.Writer, result sem.GateResult, manifests []string) {
 	out = termsafe.NewWriter(out)
 
 	scope := result.Base + " -> " + result.Head
@@ -399,10 +537,10 @@ func writeGateText(out io.Writer, result sem.GateResult) {
 		}
 	}
 
-	if command, why := gateVerifyCommand(result); command != "" {
-		fmt.Fprintf(out, "\nVERIFY: %s\n", termsafe.Line(command))
-		if why != "" {
-			fmt.Fprintf(out, "  widened: %s\n", termsafe.Line(why))
+	for _, plan := range gateVerifyPlans(manifests, result) {
+		fmt.Fprintf(out, "\nVERIFY: %s\n", termsafe.Line(plan.Command))
+		if plan.Why != "" {
+			fmt.Fprintf(out, "  widened: %s\n", termsafe.Line(plan.Why))
 		}
 	}
 }
