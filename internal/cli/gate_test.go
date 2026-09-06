@@ -278,3 +278,51 @@ func TestGateTextExplainsAWidenedVerifyCommand(t *testing.T) {
 		t.Errorf("expected the named analysis gap to be reported:\n%s", got)
 	}
 }
+
+// The widened command is a Go command, so it may only be emitted for Go. Running gate on a Python
+// repository produced `go test ./src/scaler_listen/ ./scripts/ ...` — a command that cannot run at
+// all. That is worse than the narrow path's failure mode, which the emitter already guards against
+// by emitting nothing rather than a command that selects nothing.
+func TestGateVerifyCommandEmitsNothingWhenNoGoPackagesChanged(t *testing.T) {
+	t.Parallel()
+
+	result := sem.GateResult{
+		Changed: []sem.GateChangedSymbol{{
+			Name: "warn", FilePath: "scripts/setup-actions.sh", StartLine: 35,
+			Verdict: sem.GateCovered, Evidence: sem.GateEvidenceHeuristic,
+			Tests: []sem.GateSelectedTest{gateTest("test_a_failed_last_run_warns", "tests/test_health.py")},
+		}, {
+			Name: "run", FilePath: "src/scaler_listen/export.py", StartLine: 75,
+			Verdict: sem.GateCovered, Evidence: sem.GateEvidenceHeuristic,
+		}},
+	}
+
+	command, _ := gateVerifyCommand(result)
+
+	if command != "" {
+		t.Errorf("emitted %q for a repository with no changed Go packages, want no command", command)
+	}
+}
+
+// Mixed repositories keep the Go half. Dropping the whole command because one changed file was
+// Python would throw away a selection that is still runnable.
+func TestGateVerifyCommandWidensOnlyOverGoPackages(t *testing.T) {
+	t.Parallel()
+
+	result := sem.GateResult{
+		Changed: []sem.GateChangedSymbol{{
+			Name: "handler", FilePath: "internal/api/handler.go", StartLine: 10,
+			Verdict: sem.GateCovered, Evidence: sem.GateEvidenceHeuristic,
+			Tests: []sem.GateSelectedTest{gateTest("TestHandler", "internal/api/handler_test.go")},
+		}, {
+			Name: "build_report", FilePath: "tools/report.py", StartLine: 4,
+			Verdict: sem.GateCovered, Evidence: sem.GateEvidenceHeuristic,
+		}},
+	}
+
+	command, _ := gateVerifyCommand(result)
+
+	if want := "go test ./internal/api/"; command != want {
+		t.Errorf("command\n got %s\nwant %s", command, want)
+	}
+}

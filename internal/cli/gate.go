@@ -292,15 +292,24 @@ func gateWidenReason(result sem.GateResult) string {
 	return ""
 }
 
-// gateWidenedCommand bounds the fallback to the packages the change set touches.
+// gateWidenedCommand bounds the fallback to the Go packages the change set touches.
 //
 // The package holding a change is the smallest scope that still contains what the resolver may
 // have missed. Falling straight to the whole repository would discard the part of the analysis
 // that did resolve, which is the opposite of degrading gracefully.
+//
+// Only Go files contribute a directory. This is a `go test` command, and gate analyses every
+// language the provider parses: run against a Python repository, an unfiltered version emitted
+// `go test ./src/... ./scripts/`, a command that cannot run at all. That is a worse failure than
+// the narrow emitter's, which already refuses to name tests `go test -run` cannot match. A mixed
+// repository still keeps its Go half rather than losing the command entirely.
 func gateWidenedCommand(result sem.GateResult) string {
 	seen := map[string]bool{}
 	dirs := make([]string, 0, len(result.Changed))
 	for _, changed := range result.Changed {
+		if !strings.HasSuffix(changed.FilePath, ".go") {
+			continue
+		}
 		dir := path.Dir(changed.FilePath)
 		if dir == "." || dir == "" || seen[dir] {
 			continue
