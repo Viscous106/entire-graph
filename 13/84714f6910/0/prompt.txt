@@ -1,0 +1,17 @@
+first tell me exact plan then i will erad and verfiy then we go ahead
+
+---
+
+ok i got the tihhng but stil its ntot clear what are we buliding ??
+
+---
+
+what is it solving who is it for and what it solve in short
+
+---
+
+ok now i get what we are buliding check out the graph repo we have cloned if it already have this thing bulid or not if ont plan out how we are going to implment it and give me a brief and the workflow as well and tell me how are the layers going to work with a lld
+
+---
+
+yes update the doc and start with L3

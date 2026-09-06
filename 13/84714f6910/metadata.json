@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "1384714f6910",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 9,
+  "files_touched": [
+    "internal/cli/gate.go",
+    "internal/cli/gate_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/13/84714f6910/0/metadata.json",
+      "transcript": "/13/84714f6910/0/full.jsonl",
+      "compact_transcript": "/13/84714f6910/0/transcript.jsonl",
+      "content_hash": "/13/84714f6910/0/content_hash.txt",
+      "prompt": "/13/84714f6910/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 266,
+    "cache_creation_tokens": 636994,
+    "cache_read_tokens": 27432347,
+    "output_tokens": 169377,
+    "api_call_count": 133
+  }
+}
