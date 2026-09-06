@@ -357,6 +357,25 @@ var commandDocs = []commandDoc{
 		examples: []string{"entire graph checkpoint abc123 --json"},
 	},
 	{
+		name:    "gate",
+		group:   groupAnalyze,
+		summary: "Which tests does this change need, and what does no test reach",
+		usage:   []string{"entire graph gate [--base <ref>] [--head <ref>] [--repo .]", "entire graph gate --checkpoint <id> [--repo .]"},
+		long: "Resolves each changed entity to a graph symbol, asks which tests reach it, and reports a verdict per changed symbol with the evidence chain that selected each test.\n\n" +
+			"COVERED means at least one test reaches the symbol. UNCOVERED means other code depends on it and no test reaches it along a path the graph can see -- the finding this command exists to surface, since search's covering-test block is simply absent when it finds nothing. ISOLATED means nothing calls the symbol at all.\n\n" +
+			"Static call resolution is heuristic: interface dispatch, reflection and generated code can hide a real test, so UNCOVERED is a prompt to check, never proof that nothing tests the symbol. Nothing is dropped silently -- changes the graph cannot place are reported with a reason.",
+		flags: []flagDoc{
+			{name: "--base", arg: "ref", def: "main", desc: "Start of the change range"},
+			{name: "--head", arg: "ref", def: "HEAD", desc: "End of the change range"},
+			{name: "--checkpoint", arg: "id", desc: "Analyze the commit behind an Entire-Checkpoint trailer instead of a ref range"},
+			{name: "--depth", arg: "n", def: "2", desc: "How far to walk inbound call edges (1 or 2)"},
+			{name: "--format", arg: "fmt", def: "text", desc: "text or json"},
+			{name: "--profile", arg: "name", def: "full", desc: "Snapshot profile; full is required for TESTS edges"},
+			{name: "--run", desc: "Run the selected tests and print an adjudicated verdict (requires --format text)"},
+		},
+		examples: []string{"entire graph gate --repo . --base main", "entire graph gate --repo . --base main --format json"},
+	},
+	{
 		name:    "verify",
 		group:   groupAnalyze,
 		summary: "Run a test command and return an adjudicated verdict, not test output",

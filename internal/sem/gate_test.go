@@ -182,3 +182,145 @@ func TestGateVerdictPrefersUncoveredWhenDependentsDisagreeWithGraph(t *testing.T
 		t.Errorf("verdict %q, want %q", got, GateUncovered)
 	}
 }
+
+// --- Gate: orchestration ----------------------------------------------------------------------
+
+func gateSnapshotFixture(relationSet []string) ProviderSnapshot {
+	return ProviderSnapshot{
+		Header:  SnapshotHeader{Profile: "full", RelationSet: relationSet},
+		Symbols: gateFixtureSymbols(),
+	}
+}
+
+func TestGateCarriesResolutionAndVerdictIntoTheResult(t *testing.T) {
+	t.Parallel()
+
+	result := Result{
+		Base: "main", Head: "HEAD",
+		Files: []FileChange{{Path: "store.go", Status: "M", Changes: []EntityChange{
+			{Type: "BODY_CHANGED", Kind: "method", Name: "Store.Put", DependentsCount: 12},
+			{Type: "BODY_CHANGED", Kind: moduleKind, Name: "store.go"},
+		}}},
+	}
+
+	got := Gate(result, gateSnapshotFixture([]string{"CALLS", "TESTS"}), GateOptions{})
+
+	if got.SchemaVersion != GateSchemaVersion {
+		t.Errorf("schema version %q, want %q", got.SchemaVersion, GateSchemaVersion)
+	}
+	if got.Base != "main" || got.Head != "HEAD" {
+		t.Errorf("range %s..%s, want main..HEAD", got.Base, got.Head)
+	}
+	if len(got.Changed) != 1 {
+		t.Fatalf("expected 1 changed symbol, got %d", len(got.Changed))
+	}
+	// gateReach is stubbed until the reachability layer lands, so no test reaches anything.
+	// A symbol with 12 dependents and no reaching test is exactly the alarm case.
+	if got.Changed[0].Verdict != GateUncovered {
+		t.Errorf("verdict %q, want %q", got.Changed[0].Verdict, GateUncovered)
+	}
+	if got.Changed[0].FilePath != "store.go" || got.Changed[0].StartLine != 88 {
+		t.Errorf("located at %s:%d, want store.go:88", got.Changed[0].FilePath, got.Changed[0].StartLine)
+	}
+	if len(got.Unresolved) != 1 || got.Unresolved[0].Reason != GateUnresolvedModule {
+		t.Errorf("expected the module-scope change reported as unresolved, got %+v", got.Unresolved)
+	}
+}
+
+// Output order must not depend on map iteration: two identical requests have to produce
+// byte-identical results, which is what the provider's determinism rule requires.
+func TestGateOrdersChangedSymbolsDeterministically(t *testing.T) {
+	t.Parallel()
+
+	result := Result{
+		Base: "main", Head: "HEAD",
+		Files: []FileChange{
+			{Path: "opts.go", Changes: []EntityChange{{Kind: "function", Name: "parseOpts"}}},
+			{Path: "store.go", Changes: []EntityChange{{Kind: "method", Name: "Store.Put"}}},
+			{Path: "cache/store.go", Changes: []EntityChange{{Kind: "method", Name: "Store.Put"}}},
+		},
+	}
+
+	want := []string{"cache/store.go", "opts.go", "store.go"}
+	for attempt := range 3 {
+		got := Gate(result, gateSnapshotFixture([]string{"CALLS"}), GateOptions{})
+		if len(got.Changed) != len(want) {
+			t.Fatalf("attempt %d: expected %d changed symbols, got %d", attempt, len(want), len(got.Changed))
+		}
+		for index, path := range want {
+			if got.Changed[index].FilePath != path {
+				t.Fatalf("attempt %d: position %d is %q, want %q", attempt, index, got.Changed[index].FilePath, path)
+			}
+		}
+	}
+}
+
+// TESTS edges are only emitted at the full profile. On a snapshot without them one evidence
+// route is missing, so a reader weighing an UNCOVERED verdict has to be told before trusting it.
+func TestGateReportsWhenTheTestsRelationIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	result := gateResultWithChange("store.go", EntityChange{Kind: "method", Name: "Store.Put"})
+
+	withTests := Gate(result, gateSnapshotFixture([]string{"CALLS", "TESTS"}), GateOptions{})
+	if !withTests.TestsRelationAvailable {
+		t.Error("snapshot advertising TESTS reported the relation as unavailable")
+	}
+
+	withoutTests := Gate(result, gateSnapshotFixture([]string{"CALLS"}), GateOptions{})
+	if withoutTests.TestsRelationAvailable {
+		t.Error("snapshot without TESTS reported the relation as available")
+	}
+}
+
+// The change analysis names a nested entity by its qualified path ("fileRelationScan.relations")
+// while the symbol table may carry only the bare name. Matching the bare name alone reported real
+// upstream changes as not-found on this repository, so both spellings have to be tried.
+func TestGateResolvesEntityNamedByQualifiedName(t *testing.T) {
+	t.Parallel()
+
+	symbols := []SymbolRecord{{
+		ID: "sym-relations", Kind: "field", Name: "relations",
+		QualifiedName: "fileRelationScan.relations",
+		FilePath:      "provider.go", StartLine: 4490, EndLine: 4492,
+	}}
+	result := gateResultWithChange("provider.go", EntityChange{
+		Type: "BODY_CHANGED", Kind: "field", Name: "fileRelationScan.relations",
+	})
+
+	resolution := resolveChangedSymbols(result, symbols)
+
+	if len(resolution.Resolved) != 1 {
+		t.Fatalf("expected the qualified name to resolve, got unresolved %+v", resolution.Unresolved)
+	}
+	if resolution.Resolved[0].Symbol.ID != "sym-relations" {
+		t.Errorf("resolved to %q, want %q", resolution.Resolved[0].Symbol.ID, "sym-relations")
+	}
+}
+
+// A changed test function is not something that needs tests written for it, and reporting one as
+// ISOLATED buries the real findings under noise. Changes inside test files are counted and
+// excluded rather than verdicted.
+func TestGateExcludesChangesInsideTestFiles(t *testing.T) {
+	t.Parallel()
+
+	symbols := []SymbolRecord{{
+		ID: "sym-test-fn", Kind: "function", Name: "TestSomething",
+		FilePath: "provider_test.go", StartLine: 15, EndLine: 40,
+	}}
+	result := gateResultWithChange("provider_test.go", EntityChange{
+		Type: "ADDED", Kind: "function", Name: "TestSomething",
+	})
+
+	got := Gate(result, ProviderSnapshot{
+		Header:  SnapshotHeader{Profile: "full", RelationSet: []string{"CALLS", "TESTS"}},
+		Symbols: symbols,
+	}, GateOptions{})
+
+	if len(got.Changed) != 0 {
+		t.Errorf("a change inside a test file must not get a verdict, got %+v", got.Changed)
+	}
+	if got.SkippedTestFileChanges != 1 {
+		t.Errorf("skipped count %d, want 1", got.SkippedTestFileChanges)
+	}
+}

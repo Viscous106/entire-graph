@@ -1,5 +1,7 @@
 package sem
 
+import "sort"
+
 // Change-anchored test selection.
 //
 // `impact` answers what a change affects. `verify` runs a test command the caller supplies.
@@ -124,7 +126,11 @@ type GateResult struct {
 	// emit TESTS edges (only the full profile does). Attribution still works through the mirror
 	// and name routes, but one evidence route is missing, and a caller reading UNCOVERED needs
 	// to know that before trusting it.
-	TestsRelationAvailable bool                `json:"tests_relation_available"`
+	TestsRelationAvailable bool `json:"tests_relation_available"`
+	// SkippedTestFileChanges counts changes inside test files. A changed test is not something
+	// that needs a test written for it, so verdicting one would bury the real findings in noise.
+	// It is counted rather than dropped silently, so the total still reconciles with the diff.
+	SkippedTestFileChanges int                 `json:"skipped_test_file_changes,omitempty"`
 	Changed                []GateChangedSymbol `json:"changed"`
 	Unresolved             []GateUnresolved    `json:"unresolved,omitempty"`
 	Warnings               []ProviderWarning   `json:"warnings,omitempty"`
@@ -183,10 +189,18 @@ type gateResolution struct {
 // no symbol to call and no test that can reach one. They are reported with their own reason
 // instead of being mislabelled as missing.
 func resolveChangedSymbols(result Result, symbols []SymbolRecord) gateResolution {
+	// Index both spellings. The change analysis names a nested entity by its qualified path
+	// ("fileRelationScan.relations") while the symbol table may carry only the bare name, so
+	// matching one spelling alone reported real upstream changes as not-found. A symbol whose
+	// qualified name equals its bare name is indexed once, not twice, so it cannot look ambiguous
+	// to itself.
 	byPathAndName := map[string][]SymbolRecord{}
 	for _, symbol := range symbols {
-		key := symbol.FilePath + "\x00" + symbol.Name
-		byPathAndName[key] = append(byPathAndName[key], symbol)
+		byPathAndName[symbol.FilePath+"\x00"+symbol.Name] = append(byPathAndName[symbol.FilePath+"\x00"+symbol.Name], symbol)
+		if symbol.QualifiedName != "" && symbol.QualifiedName != symbol.Name {
+			key := symbol.FilePath + "\x00" + symbol.QualifiedName
+			byPathAndName[key] = append(byPathAndName[key], symbol)
+		}
 	}
 
 	resolution := gateResolution{}
@@ -224,4 +238,149 @@ func resolveChangedSymbols(result Result, symbols []SymbolRecord) gateResolution
 		}
 	}
 	return resolution
+}
+
+// --- L6: verdict ------------------------------------------------------------------------------
+
+// gateVerdictFor turns reachability output into the answer a reader acts on.
+//
+// The interesting case is the third one. hasCallers comes from resolved graph edges;
+// dependents comes from the change analysis, which counts references textually and so sees uses
+// the call resolver could not resolve. When they disagree — no resolved caller, but dependents
+// counted — the honest reading is that something uses this symbol through a call static analysis
+// missed. Reporting ISOLATED there would assert "nothing uses this" on evidence we do not have,
+// so the tie breaks toward UNCOVERED, which asks the reader to look rather than telling them not
+// to bother.
+//
+// Note what UNCOVERED does NOT claim. It means no test reaches this symbol along a path the graph
+// can see. Interface dispatch, reflection, table-driven registration and generated code can all
+// hide a real test, so this is a prompt to check, never a proof of absence.
+func gateVerdictFor(tests []gateReachedTest, hasCallers bool, dependents int) GateVerdict {
+	if len(tests) > 0 {
+		return GateCovered
+	}
+	if hasCallers || dependents > 0 {
+		return GateUncovered
+	}
+	return GateIsolated
+}
+
+// --- Gate: orchestration ----------------------------------------------------------------------
+
+// Gate answers, for one change set, which tests reach each changed symbol and which changed
+// symbols nothing reaches.
+//
+// It is a pure function of (result, snapshot, options): no file reads, no git, no clock, no
+// network. Everything it needs was already produced by the change analysis and the provider
+// snapshot, which is what lets the whole pipeline be table-tested and what keeps it on the
+// provider side of the line drawn in docs/brain-and-graph-boundaries.md.
+func Gate(result Result, snapshot ProviderSnapshot, options GateOptions) GateResult {
+	options = options.withDefaults()
+
+	symbolsByID := make(map[string]SymbolRecord, len(snapshot.Symbols))
+	symbolsByFile := make(map[string][]SymbolRecord, len(snapshot.Files))
+	for _, symbol := range snapshot.Symbols {
+		symbolsByID[symbol.ID] = symbol
+		symbolsByFile[symbol.FilePath] = append(symbolsByFile[symbol.FilePath], symbol)
+	}
+
+	gate := GateResult{
+		SchemaVersion:          GateSchemaVersion,
+		Base:                   result.Base,
+		Head:                   result.Head,
+		Checkpoint:             result.Checkpoint,
+		Profile:                snapshot.Header.Profile,
+		TestsRelationAvailable: gateRelationAdvertised(snapshot.Header.RelationSet, "TESTS"),
+		Warnings:               snapshot.Header.Warnings,
+	}
+
+	resolution := resolveChangedSymbols(result, snapshot.Symbols)
+
+	reach := gateReachOptions{Depth: options.Depth, MaxFanOut: options.MaxFanOut}
+	for _, resolved := range resolution.Resolved {
+		if searchTestArtifactPath(searchLowerPath(resolved.Path)) {
+			gate.SkippedTestFileChanges++
+			continue
+		}
+		tests, hasCallers, truncated := gateReach(
+			resolved.Symbol, snapshot.Relations, symbolsByID, symbolsByFile, reach,
+		)
+		gate.Changed = append(gate.Changed, GateChangedSymbol{
+			Name:       resolved.Symbol.Name,
+			Kind:       resolved.Symbol.Kind,
+			FilePath:   resolved.Symbol.FilePath,
+			StartLine:  resolved.Symbol.StartLine,
+			ChangeType: resolved.Change.Type,
+			Dependents: resolved.Change.DependentsCount,
+			Verdict:    gateVerdictFor(tests, hasCallers, resolved.Change.DependentsCount),
+			Tests:      gateSelectedTests(tests),
+			Truncated:  truncated,
+		})
+	}
+
+	for _, unresolved := range resolution.Unresolved {
+		if searchTestArtifactPath(searchLowerPath(unresolved.Path)) {
+			gate.SkippedTestFileChanges++
+			continue
+		}
+		gate.Unresolved = append(gate.Unresolved, GateUnresolved{
+			Name:   unresolved.Change.Name,
+			Kind:   unresolved.Change.Kind,
+			Path:   unresolved.Path,
+			Reason: unresolved.Reason,
+		})
+	}
+
+	// Positional order is the honest presentation of a change set — it mirrors how a reader
+	// walks a diff — and sorting explicitly keeps map iteration out of the output, so two
+	// identical requests render byte-identically.
+	sort.Slice(gate.Changed, func(left, right int) bool {
+		if gate.Changed[left].FilePath != gate.Changed[right].FilePath {
+			return gate.Changed[left].FilePath < gate.Changed[right].FilePath
+		}
+		if gate.Changed[left].StartLine != gate.Changed[right].StartLine {
+			return gate.Changed[left].StartLine < gate.Changed[right].StartLine
+		}
+		return gate.Changed[left].Name < gate.Changed[right].Name
+	})
+	sort.Slice(gate.Unresolved, func(left, right int) bool {
+		if gate.Unresolved[left].Path != gate.Unresolved[right].Path {
+			return gate.Unresolved[left].Path < gate.Unresolved[right].Path
+		}
+		return gate.Unresolved[left].Name < gate.Unresolved[right].Name
+	})
+
+	return gate
+}
+
+// gateRelationAdvertised reports whether the snapshot's header claims to carry a relation type.
+// An empty set means the header did not enumerate one, which is not the same as promising the
+// relation is absent, so it is read as "not advertised" rather than "known missing".
+func gateRelationAdvertised(relationSet []string, relation string) bool {
+	for _, candidate := range relationSet {
+		if candidate == relation {
+			return true
+		}
+	}
+	return false
+}
+
+// gateSelectedTests projects reachability output onto the public result shape.
+func gateSelectedTests(tests []gateReachedTest) []GateSelectedTest {
+	if len(tests) == 0 {
+		return nil
+	}
+	selected := make([]GateSelectedTest, 0, len(tests))
+	for _, test := range tests {
+		selected = append(selected, GateSelectedTest{
+			SymbolID:  test.Symbol.ID,
+			Name:      test.Symbol.Name,
+			FilePath:  test.Symbol.FilePath,
+			StartLine: test.Symbol.StartLine,
+			Route:     test.Route,
+			Depth:     test.Depth,
+			Chain:     test.Chain,
+		})
+	}
+	return selected
 }
