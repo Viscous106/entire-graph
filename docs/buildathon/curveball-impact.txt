@@ -1,0 +1,183 @@
+Noon Curveball — graph impact analysis, captured BEFORE implementation
+======================================================================
+
+Track E2 · entire graph gate · 2026-09-06
+
+Run against the working tree at commit 01520bf (= local c52611f rebased onto the
+teammate's 9c2ceb5, which supplies the real L4/L5 reachability). No curveball code
+had been written when these were captured; the tree is the pre-revision baseline.
+
+The three symbols are the three the five-point revision in docs/buildathon/CURVEBALL.md
+actually touches:
+
+  gateVerdictFor  — the function that returns UNCOVERED on absence of evidence
+                    (revision points 1 and 4)
+  gateReach       — the function that produces the route labels the grading grades,
+                    and the teammate's file (revision point 1, coordination check)
+  Gate            — the orchestrator that would carry partiality and the fallback
+                    (revision points 2 and 3)
+
+Command lines, exactly as run:
+
+  entire graph impact --repo . --symbol gateVerdictFor --format text
+  entire graph impact --repo . --symbol gateReach --format text
+  entire graph impact --repo . --symbol Gate --file internal/sem/gate.go --format text
+
+The "Index: cache-miss" latency line is the tool's own header; the working tree is
+rebuilt per query and never cached, so it appears on every run.
+
+
+======================================================================
+$ entire graph impact --repo . --symbol gateVerdictFor  --format text
+======================================================================
+Index: cache-miss (35676ms) | Query: 16ms | Total: 35693ms
+Impact: gateVerdictFor (internal/sem/gate.go:258) def=258 span=258-266 [function]
+Blast radius: 10 callers (5 direct, 5 transitive), 0 callees, 4 type consumers, 0 data flows, 3 co-change files, 0 siblings.
+Callers (5 direct, 5 transitive; who breaks if behavior changes):
+- Gate (internal/sem/gate.go:315, def :277)
+- TestGateVerdictCoveredWhenATestReaches (internal/sem/gate_test.go:143, def :140)
+- TestGateVerdictUncoveredWhenCallersButNoTestReaches (internal/sem/gate_test.go:155, def :152)
+- TestGateVerdictIsolatedWhenNothingCallsIt (internal/sem/gate_test.go:165, def :162)
+- TestGateVerdictPrefersUncoveredWhenDependentsDisagreeWithGraph (internal/sem/gate_test.go:179, def :176)
+- runGate (internal/cli/gate.go:164, def :120) [via Gate]
+- TestGateCarriesResolutionAndVerdictIntoTheResult (internal/sem/gate_test.go:206, def :195) [via Gate]
+- TestGateOrdersChangedSymbolsDeterministically (internal/sem/gate_test.go:246, def :232) [via Gate]
+- TestGateReportsWhenTheTestsRelationIsUnavailable (internal/sem/gate_test.go:265, def :260) [+1 more call site, via Gate]
+- TestGateExcludesChangesInsideTestFiles (internal/sem/gate_test.go:315, def :304) [via Gate]
+Callees (0; what it depends on):
+- none
+Type consumers (0 in, 4 out; USES_TYPE/PARAM_TYPE/RETURNS_TYPE):
+- -> GateVerdict (internal/sem/gate.go:29) [RETURNS_TYPE]
+- -> GateVerdict (internal/sem/gate.go:29) [USES_TYPE]
+- -> gateReachedTest (internal/sem/gate.go:151) [PARAM_TYPE]
+- -> gateReachedTest (internal/sem/gate.go:151) [USES_TYPE]
+Data flows (0 in, 0 out):
+- none
+Co-change coupling (3; files that historically change with internal/sem/gate.go):
+- internal/cli/gate.go [files changed together in 2 recent commits]
+- internal/cli/gate_test.go [files changed together in 2 recent commits]
+- internal/sem/gate_test.go [files changed together in 2 recent commits]
+Same-container siblings (0):
+- none
+
+
+======================================================================
+$ entire graph impact --repo . --symbol gateReach  --format text
+======================================================================
+Index: cache-miss (35559ms) | Query: 17ms | Total: 35576ms
+Impact: gateReach (internal/sem/gate_reach.go:60) def=60 span=60-168 [function]
+Blast radius: 22 callers (3 direct, 19 transitive), 9 callees, 8 type consumers, 5 data flows, 0 co-change files, 0 siblings.
+Callers (3 direct, 19 transitive; who breaks if behavior changes):
+- Gate (internal/sem/gate.go:305, def :277)
+- reachRun (internal/sem/gate_reach_test.go:29, def :27)
+- TestReachLabelsTheMirrorRouteDistinctly (internal/sem/gate_reach_test.go:355, def :347)
+- runGate (internal/cli/gate.go:164, def :120) [via Gate]
+- TestReachFindsTestThatCallsTheAnchorDirectly (internal/sem/gate_reach_test.go:75, def :72) [via reachRun]
+- TestReachDoesNotSelectANonTestCaller (internal/sem/gate_reach_test.go:103, def :100) [via reachRun]
+- TestReachFindsTestThroughAnIntermediateCall (internal/sem/gate_reach_test.go:126, def :115) [via reachRun]
+- TestReachRespectsDepthOne (internal/sem/gate_reach_test.go:154, def :143) [via reachRun]
+- TestReachTerminatesOnACallCycle (internal/sem/gate_reach_test.go:183, def :165) [via reachRun]
+- TestReachIgnoresASelfEdgeWhenReportingCallers (internal/sem/gate_reach_test.go:197, def :193) [via reachRun]
+- TestReachReportsCallersWhenDependentsExistButNoTestReaches (internal/sem/gate_reach_test.go:216, def :209) [via reachRun]
+- TestReachReportsNoCallersWhenNothingCallsTheAnchor (internal/sem/gate_reach_test.go:233, def :226) [via reachRun]
+- TestReachCountsAnEdgeFromAnUnknownSymbolAsACaller (internal/sem/gate_reach_test.go:249, def :245) [via reachRun]
+- TestReachReportsTruncationWhenFanOutCapBites (internal/sem/gate_reach_test.go:277, def :261) [via reachRun]
+- TestReachIsDeterministicAcrossRelationOrder (internal/sem/gate_reach_test.go:309, def :290) [+1 more call site, via reachRun]
+- ... +7 more (use --format json for the full list)
+Callees (9; what it depends on):
+- sort.Slice
+- gateReachChain (internal/sem/gate_reach.go:194)
+- gateReachInboundEdges (internal/sem/gate_reach.go:209)
+- gateReachExpandable (internal/sem/gate_reach.go:254)
+- gateReachIsTest (internal/sem/gate_reach.go:278)
+- gateReachMirrorFiles (internal/sem/gate_reach.go:284)
+- gateReachRoute (internal/sem/gate_reach.go:298)
+- gateReachName (internal/sem/gate_reach.go:312)
+- searchCoveringTestCandidates (internal/sem/search_covertest.go:421)
+Type consumers (0 in, 8 out; USES_TYPE/PARAM_TYPE/RETURNS_TYPE):
+- -> gateReachOptions (internal/sem/gate.go:145) [PARAM_TYPE]
+- -> gateReachOptions (internal/sem/gate.go:145) [USES_TYPE]
+- -> gateReachedTest (internal/sem/gate.go:151) [RETURNS_TYPE]
+- -> gateReachedTest (internal/sem/gate.go:151) [USES_TYPE]
+- -> SymbolRecord (internal/sem/provider.go:319) [PARAM_TYPE]
+- -> SymbolRecord (internal/sem/provider.go:319) [USES_TYPE]
+- -> RelationRecord (internal/sem/provider.go:371) [PARAM_TYPE]
+- -> RelationRecord (internal/sem/provider.go:371) [USES_TYPE]
+Data flows (0 in, 5 out):
+- -> gateReachInboundEdges (internal/sem/gate_reach.go:209)
+- -> gateReachExpandable (internal/sem/gate_reach.go:254)
+- -> gateReachMirrorFiles (internal/sem/gate_reach.go:284)
+- -> reachRun (internal/sem/gate_reach_test.go:27)
+- -> searchCoveringTestCandidates (internal/sem/search_covertest.go:421)
+Co-change coupling (0; files that historically change with internal/sem/gate_reach.go):
+- none
+Same-container siblings (0):
+- none
+
+
+======================================================================
+$ entire graph impact --repo . --symbol Gate --file internal/sem/gate.go --format text
+======================================================================
+impact received unexpected argument "--file internal/sem/gate.go"
+
+
+======================================================================
+What the analysis says about the revision (read before editing)
+======================================================================
+
+1. THE REVISION IS CONTAINED IN FILES WE OWN.
+
+   gateVerdictFor  5 direct callers: Gate + 4 tests, all in internal/sem/gate.go
+                   and internal/sem/gate_test.go. 0 callees. No caller outside
+                   internal/sem.
+   Gate            5 direct callers: runGate (internal/cli/gate.go:164) + 4 tests.
+                   The single production path is Run -> runGate -> Gate.
+   gateReach       3 direct callers: Gate, plus the teammate's own test helper
+                   reachRun and TestReachLabelsTheMirrorRouteDistinctly.
+
+   Every caller of the two functions the revision changes lives in a file the
+   handover assigns to us. Nothing under internal/sem/ other than gate*.go is
+   implicated, so the no-regression rule on the provider holds by construction.
+
+2. GRADING NEEDS NO EDIT TO THE TEAMMATE'S FILE.  <-- the coordination question
+
+   gateReach's callees include gateReachRoute (internal/sem/gate_reach.go:298),
+   which already returns exactly "edge" / "mirror" / "name", and its type
+   consumers show it RETURNS_TYPE gateReachedTest -- a type declared on OUR side
+   of the seam, at internal/sem/gate.go:151, carrying the Route field.
+
+   So the evidence classes the revision must grade are already produced and
+   already cross the seam. Mapping route -> grade (edge=confirmed,
+   mirror|name=heuristic, no-tests=unverified) is a pure function of data
+   gate.go already receives. internal/sem/gate_reach.go does not need to change,
+   and we will not touch it.
+
+3. PARTIALITY DETECTION EXTENDS AN EXISTING PATTERN, IT DOES NOT INVENT ONE.
+
+   Gate's callees already include gateRelationAdvertised (gate.go:359), which
+   reads snapshot.Header.RelationSet to decide TestsRelationAvailable -- the
+   existing precedent for "the header tells us how complete the input is".
+   Gate already copies snapshot.Header.Warnings into the result. The fields
+   CURVEBALL.md point 2 names all exist: Header.PartialFailures
+   (provider.go:245), Header.Warnings, Header.LanguageTiers (provider.go:236,
+   value "inventory-only" at provider.go:712).
+
+4. THE FALLBACK COMMAND IS ONE FUNCTION, ON OUR SIDE.
+
+   gateGoTestCommand (internal/cli/gate.go:240) builds the
+   `go test -run '^(A|B)$' ./...` alternation. Point 3's widening is a change to
+   that one function plus its caller, both in internal/cli/gate.go.
+
+5. WHAT THE BLAST RADIUS WARNS ABOUT.
+
+   gateVerdictFor has 4 dedicated tests and Gate has 4 more that reach it
+   transitively. Changing gateVerdictFor's signature breaks 8 named tests at
+   once. Point 4 requires fully-resolved behaviour to stay byte-identical, so
+   those 8 are the regression surface: they must keep passing UNCHANGED, and a
+   new signature must be additive rather than a rewrite of the existing one.
+
+   Co-change coupling confirms the working set: internal/sem/gate.go has changed
+   together with internal/cli/gate.go, internal/cli/gate_test.go and
+   internal/sem/gate_test.go in 2 recent commits. Those four files are the
+   expected footprint of this revision. A diff that reaches outside them is a
+   signal to stop.
