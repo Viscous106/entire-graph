@@ -1,0 +1,13 @@
+continue
+
+---
+
+done, pulled — run the impact analysis cd /home/viscous/Viscous/BTW/entire-graph
+export ENTIRE_TOKEN_STORE=file ENTIRE_TOKEN_STORE_PATH=/home/viscous/Viscous/BTW/.entire/config/tokens.json
+export PATH="/home/viscous/Viscous/BTW/.entire/bin:$PATH"
+
+git pull --rebase origin main
+
+---
+
+done, pulled — run the impact analysis
