@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"sort"
 	"strings"
 
@@ -254,6 +255,66 @@ func gateGoTestCommand(tests []sem.GateSelectedTest) string {
 	return "go test -run '^(" + strings.Join(names, "|") + ")$' ./..."
 }
 
+// gateVerifyCommand chooses between the narrow selection and a widened fallback, and says why
+// when it widens.
+//
+// Returns ("", "") when there is nothing runnable, preserving the existing behaviour that no
+// command at all is better than one which silently selects nothing.
+func gateVerifyCommand(result sem.GateResult) (command, why string) {
+	narrow := gateGoTestCommand(gateAllSelectedTests(result))
+
+	reason := gateWidenReason(result)
+	if reason == "" {
+		return narrow, ""
+	}
+	widened := gateWidenedCommand(result)
+	if widened == "" {
+		return narrow, ""
+	}
+	return widened, reason
+}
+
+// gateWidenReason reports why the narrow command cannot be trusted, or "" when it can.
+//
+// Partiality is checked first because it is the stronger statement: the input itself was not whole,
+// so nothing computed from it is safe to narrow on. Heuristic-only evidence is the second case —
+// the analysis was complete, but what it found is a naming convention rather than a resolved call.
+func gateWidenReason(result sem.GateResult) string {
+	if result.Partial {
+		return "analysis over the changed files was incomplete, so a narrow selection could skip what the parser missed"
+	}
+	for _, changed := range result.Changed {
+		if len(changed.Tests) > 0 && changed.Evidence == sem.GateEvidenceHeuristic {
+			return "the only evidence for " + changed.Name +
+				" is a naming convention, not a resolved call, so a narrow selection asserts more than the graph found"
+		}
+	}
+	return ""
+}
+
+// gateWidenedCommand bounds the fallback to the packages the change set touches.
+//
+// The package holding a change is the smallest scope that still contains what the resolver may
+// have missed. Falling straight to the whole repository would discard the part of the analysis
+// that did resolve, which is the opposite of degrading gracefully.
+func gateWidenedCommand(result sem.GateResult) string {
+	seen := map[string]bool{}
+	dirs := make([]string, 0, len(result.Changed))
+	for _, changed := range result.Changed {
+		dir := path.Dir(changed.FilePath)
+		if dir == "." || dir == "" || seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		dirs = append(dirs, "./"+dir+"/")
+	}
+	if len(dirs) == 0 {
+		return ""
+	}
+	sort.Strings(dirs)
+	return "go test " + strings.Join(dirs, " ")
+}
+
 // gateAllSelectedTests flattens every per-symbol selection into one set for the command.
 func gateAllSelectedTests(result sem.GateResult) []sem.GateSelectedTest {
 	var all []sem.GateSelectedTest
@@ -282,15 +343,24 @@ func writeGateText(out io.Writer, result sem.GateResult) {
 			"attribution used call edges and naming conventions only\n", termsafe.Line(result.Profile))
 	}
 
+	if result.Partial {
+		fmt.Fprint(out, "\nPARTIAL ANALYSIS — verdicts below are computed from an input the parser could not fully read\n")
+		for _, gap := range result.AnalysisGaps {
+			fmt.Fprintf(out, "  %s   %s   %s\n",
+				termsafe.Line(gap.FilePath), termsafe.Line(gap.Code), termsafe.Line(gap.Reason))
+		}
+	}
+
 	for _, changed := range result.Changed {
-		fmt.Fprintf(out, "\n%-9s %s   %s:%d\n",
-			changed.Verdict, termsafe.Line(changed.Name), termsafe.Line(changed.FilePath), changed.StartLine)
+		fmt.Fprintf(out, "\n%-9s %s   %s:%d   [%s]\n",
+			changed.Verdict, termsafe.Line(changed.Name), termsafe.Line(changed.FilePath), changed.StartLine,
+			termsafe.Line(string(changed.Evidence)))
 		fmt.Fprintf(out, "  dependents: %d\n", changed.Dependents)
 
 		for _, test := range changed.Tests {
-			fmt.Fprintf(out, "  selected:   %s   %s:%d  (%s, depth %d)\n",
+			fmt.Fprintf(out, "  selected:   %s   %s:%d  (%s -> %s, depth %d)\n",
 				termsafe.Line(test.Name), termsafe.Line(test.FilePath), test.StartLine,
-				termsafe.Line(test.Route), test.Depth)
+				termsafe.Line(test.Route), termsafe.Line(string(test.Evidence)), test.Depth)
 			if len(test.Chain) > 1 {
 				fmt.Fprintf(out, "  evidence:   %s\n", termsafe.Line(strings.Join(test.Chain, " -> ")))
 			}
@@ -315,7 +385,10 @@ func writeGateText(out io.Writer, result sem.GateResult) {
 		}
 	}
 
-	if command := gateGoTestCommand(gateAllSelectedTests(result)); command != "" {
+	if command, why := gateVerifyCommand(result); command != "" {
 		fmt.Fprintf(out, "\nVERIFY: %s\n", termsafe.Line(command))
+		if why != "" {
+			fmt.Fprintf(out, "  widened: %s\n", termsafe.Line(why))
+		}
 	}
 }

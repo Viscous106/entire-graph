@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/entireio/entire-graph/internal/sem"
@@ -117,5 +119,162 @@ func TestGateRunSummaryFallsBackToExitCodeWhenUnparsed(t *testing.T) {
 	}
 	if got, want := gateRunSummary(nil, false, 2), "VERDICT: selected tests failed (exit 2; no per-test output recognised)"; got != want {
 		t.Errorf("summary\n got %s\nwant %s", got, want)
+	}
+}
+
+// --- Curveball: the fallback command ----------------------------------------------------------
+//
+// A narrow command derived from incomplete evidence is the dangerous output. It looks
+// authoritative, and it silently skips whatever the resolver missed. When the evidence behind a
+// selection is not structural, or the analysis behind it was not whole, the command has to widen
+// and say why — degrading toward running more tests rather than fewer.
+
+// gateResultWith builds a result carrying one changed symbol with the given evidence grade.
+func gateResultWith(evidence sem.GateEvidence, partial bool, tests ...sem.GateSelectedTest) sem.GateResult {
+	return sem.GateResult{
+		Partial: partial,
+		Changed: []sem.GateChangedSymbol{{
+			Name: "Store.Put", FilePath: "internal/sem/store.go", StartLine: 88,
+			Verdict: sem.GateCovered, Evidence: evidence, Tests: tests,
+		}},
+	}
+}
+
+// POINT 4, the regression that guards everything else. With complete analysis and a resolved edge,
+// the command is byte-identical to what the pre-curveball emitter produced. If this test ever
+// changes, the revision stopped being additive.
+func TestGateVerifyCommandIsUnchangedForFullyResolvedCode(t *testing.T) {
+	t.Parallel()
+
+	result := gateResultWith(sem.GateEvidenceConfirmed, false,
+		gateTest("TestServeHTTP", "mux_test.go"),
+		gateTest("TestRouteMatch", "mux_test.go"),
+	)
+
+	command, why := gateVerifyCommand(result)
+
+	if want := `go test -run '^(TestRouteMatch|TestServeHTTP)$' ./...`; command != want {
+		t.Errorf("command\n got %s\nwant %s", command, want)
+	}
+	if why != "" {
+		t.Errorf("a fully resolved selection must widen for no reason, got %q", why)
+	}
+}
+
+func TestGateVerifyCommandWidensWhenAnalysisIsPartial(t *testing.T) {
+	t.Parallel()
+
+	result := gateResultWith(sem.GateEvidenceConfirmed, true, gateTest("TestServeHTTP", "mux_test.go"))
+
+	command, why := gateVerifyCommand(result)
+
+	if command == `go test -run '^(TestServeHTTP)$' ./...` {
+		t.Fatal("a narrow command was emitted from a partial analysis")
+	}
+	if want := "go test ./internal/sem/"; command != want {
+		t.Errorf("command\n got %s\nwant %s", command, want)
+	}
+	if why == "" {
+		t.Error("a widened command must say why it widened")
+	}
+}
+
+// A selection resting only on a mirror filename or a name match is a convention, not a call. It
+// may well be right — but narrowing the suite to it asserts a structural claim the graph never
+// made.
+func TestGateVerifyCommandWidensWhenEvidenceIsOnlyHeuristic(t *testing.T) {
+	t.Parallel()
+
+	result := gateResultWith(sem.GateEvidenceHeuristic, false, gateTest("TestServeHTTP", "mux_test.go"))
+
+	command, why := gateVerifyCommand(result)
+
+	if want := "go test ./internal/sem/"; command != want {
+		t.Errorf("command\n got %s\nwant %s", command, want)
+	}
+	if why == "" {
+		t.Error("a widened command must say why it widened")
+	}
+}
+
+// Widening has to stay bounded. The package holding the change is the smallest scope that still
+// contains what the resolver may have missed; falling straight to the whole repository would throw
+// away the part of the analysis that did resolve.
+func TestGateVerifyCommandWidensToThePackagesThatChanged(t *testing.T) {
+	t.Parallel()
+
+	result := gateResultWith(sem.GateEvidenceHeuristic, false, gateTest("TestServeHTTP", "mux_test.go"))
+	result.Changed = append(result.Changed, sem.GateChangedSymbol{
+		Name: "runGate", FilePath: "internal/cli/gate.go", StartLine: 120,
+		Verdict: sem.GateCovered, Evidence: sem.GateEvidenceHeuristic,
+	})
+
+	command, _ := gateVerifyCommand(result)
+
+	if want := "go test ./internal/cli/ ./internal/sem/"; command != want {
+		t.Errorf("command\n got %s\nwant %s", command, want)
+	}
+}
+
+// --- Curveball: rendering the grade -----------------------------------------------------------
+
+func gateRenderText(t *testing.T, result sem.GateResult) string {
+	t.Helper()
+	var buffer bytes.Buffer
+	writeGateText(&buffer, result)
+	return buffer.String()
+}
+
+// The grade has to be machine-readable in JSON and legible in text. Before the revision the text
+// output hedged in prose ("no path the graph can see") while nothing carried the caveat in a form
+// a reader could act on, and the JSON carried none at all.
+func TestGateTextShowsTheEvidenceGrade(t *testing.T) {
+	t.Parallel()
+
+	got := gateRenderText(t, gateResultWith(sem.GateEvidenceConfirmed, false,
+		gateTest("TestServeHTTP", "mux_test.go")))
+
+	if !strings.Contains(got, "confirmed") {
+		t.Errorf("text output does not carry the evidence grade:\n%s", got)
+	}
+}
+
+// An UNCOVERED verdict rests on the absence of an edge. The text must say the claim is unverified,
+// not merely hedge about it in prose.
+func TestGateTextGradesAnUncoveredVerdictAsUnverified(t *testing.T) {
+	t.Parallel()
+
+	result := sem.GateResult{Changed: []sem.GateChangedSymbol{{
+		Name: "Store.Put", FilePath: "internal/sem/store.go", StartLine: 88, Dependents: 12,
+		Verdict: sem.GateUncovered, Evidence: sem.GateEvidenceUnverified,
+	}}}
+
+	got := gateRenderText(t, result)
+
+	if !strings.Contains(got, "unverified") {
+		t.Errorf("an UNCOVERED verdict must be graded unverified in text:\n%s", got)
+	}
+}
+
+// A widened command that does not say why it widened is just a slower command. The reason is what
+// lets the reader decide whether to trust it or go and look at the source.
+func TestGateTextExplainsAWidenedVerifyCommand(t *testing.T) {
+	t.Parallel()
+
+	result := gateResultWith(sem.GateEvidenceConfirmed, true, gateTest("TestServeHTTP", "mux_test.go"))
+	result.AnalysisGaps = []sem.GateAnalysisGap{{
+		FilePath: "internal/sem/store.go", Code: "E_PARSE_FAILED", Reason: "relations from this file are missing",
+	}}
+
+	got := gateRenderText(t, result)
+
+	if !strings.Contains(got, "VERIFY: go test ./internal/sem/") {
+		t.Errorf("expected the widened command in the VERIFY line:\n%s", got)
+	}
+	if !strings.Contains(got, "incomplete") {
+		t.Errorf("expected the widening to be explained:\n%s", got)
+	}
+	if !strings.Contains(got, "E_PARSE_FAILED") {
+		t.Errorf("expected the named analysis gap to be reported:\n%s", got)
 	}
 }

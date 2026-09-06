@@ -90,6 +90,10 @@ type GateSelectedTest struct {
 	// Chain is the path from the test down to the changed symbol, as qualified names. This is
 	// what makes a selection checkable: every hop can be re-queried with `graph neighbors`.
 	Chain []string `json:"chain"`
+	// Evidence grades Route: a resolved edge is confirmed structural evidence, a mirror or name
+	// match is a heuristic. Route already said which convention fired; Evidence says whether it
+	// is a convention at all, which is the part a reader has to act on.
+	Evidence GateEvidence `json:"evidence"`
 }
 
 // GateChangedSymbol is one changed symbol and its verdict.
@@ -105,6 +109,9 @@ type GateChangedSymbol struct {
 	// Truncated marks that the fan-out cap was hit while walking to this symbol, so the test
 	// list may be incomplete. Reported, never silent.
 	Truncated bool `json:"truncated,omitempty"`
+	// Evidence grades the verdict: the strongest evidence behind it when tests were selected,
+	// and unverified when the verdict rests on the absence of an edge.
+	Evidence GateEvidence `json:"evidence"`
 }
 
 // GateUnresolved is a changed entity that could not be tied to exactly one symbol.
@@ -113,6 +120,18 @@ type GateUnresolved struct {
 	Kind   string `json:"kind"`
 	Path   string `json:"path"`
 	Reason string `json:"reason"`
+}
+
+// GateGapInventoryOnly marks a changed file whose language is parsed for inventory only: it has
+// file and symbol records but no relations at all, so every reachability answer about it is an
+// artifact of the tier rather than a finding about the code.
+const GateGapInventoryOnly = "E_INVENTORY_ONLY_LANGUAGE"
+
+// GateAnalysisGap is one reason the analysis behind this change set was incomplete.
+type GateAnalysisGap struct {
+	FilePath string `json:"file_path,omitempty"`
+	Code     string `json:"code"`
+	Reason   string `json:"reason"`
 }
 
 // GateResult is the whole answer.
@@ -130,10 +149,17 @@ type GateResult struct {
 	// SkippedTestFileChanges counts changes inside test files. A changed test is not something
 	// that needs a test written for it, so verdicting one would bury the real findings in noise.
 	// It is counted rather than dropped silently, so the total still reconciles with the diff.
-	SkippedTestFileChanges int                 `json:"skipped_test_file_changes,omitempty"`
-	Changed                []GateChangedSymbol `json:"changed"`
-	Unresolved             []GateUnresolved    `json:"unresolved,omitempty"`
-	Warnings               []ProviderWarning   `json:"warnings,omitempty"`
+	SkippedTestFileChanges int `json:"skipped_test_file_changes,omitempty"`
+	// Partial is true when the analysis behind these verdicts was incomplete over the files this
+	// change set touches. It does not mean a verdict is wrong; it means the input the verdict was
+	// computed from was not whole, so no verdict here may be read as certain.
+	Partial bool `json:"partial"`
+	// AnalysisGaps names why, one entry per reason. Partial without a named reason would be an
+	// unfalsifiable hedge, which is the same failure as a confident wrong answer.
+	AnalysisGaps []GateAnalysisGap   `json:"analysis_gaps,omitempty"`
+	Changed      []GateChangedSymbol `json:"changed"`
+	Unresolved   []GateUnresolved    `json:"unresolved,omitempty"`
+	Warnings     []ProviderWarning   `json:"warnings,omitempty"`
 }
 
 // --- the seam between resolution/verdict and reachability/attribution -------------------------
@@ -153,6 +179,131 @@ type gateReachedTest struct {
 	Route  string
 	Depth  int
 	Chain  []string
+}
+
+// --- Curveball: evidence grading ---------------------------------------------------------------
+
+// GateEvidence grades how much a claim about a changed symbol is actually worth.
+type GateEvidence string
+
+// gateRouteEdge is the route label gate_reach.go emits for a resolved relation. The other two
+// labels it emits ("mirror", "name") are conventions and share the heuristic grade, so only the
+// structural one needs naming here.
+const gateRouteEdge = "edge"
+
+const (
+	// GateEvidenceConfirmed: a resolved CALLS/ASYNC_CALLS/TESTS edge.
+	GateEvidenceConfirmed GateEvidence = "confirmed"
+	// GateEvidenceHeuristic: a mirror test file or a name mentioning the symbol.
+	GateEvidenceHeuristic GateEvidence = "heuristic"
+	// GateEvidenceUnverified: a claim resting on the absence of evidence.
+	GateEvidenceUnverified GateEvidence = "unverified"
+)
+
+// gateEvidenceForRoute grades a single attribution route.
+//
+// gate_reach.go admits a test through three routes and records which one fired. Only "edge" is a
+// relation the resolver actually followed; "mirror" and "name" are filename and identifier
+// conventions that correlate with coverage without demonstrating it.
+func gateEvidenceForRoute(route string) GateEvidence {
+	if route == gateRouteEdge {
+		return GateEvidenceConfirmed
+	}
+	return GateEvidenceHeuristic
+}
+
+// gateEvidenceFor grades the strongest evidence behind a set of selected tests.
+//
+// The aggregate takes the strongest member, not the weakest: one resolved edge justifies COVERED
+// by itself, so a convention match tagging along behind a real call must not downgrade it. An
+// empty set is unverified — the claim then rests on the absence of an edge, which is a fact about
+// what the resolver followed rather than a fact about the repository.
+func gateEvidenceFor(tests []gateReachedTest) GateEvidence {
+	if len(tests) == 0 {
+		return GateEvidenceUnverified
+	}
+	for _, test := range tests {
+		if gateEvidenceForRoute(test.Route) == GateEvidenceConfirmed {
+			return GateEvidenceConfirmed
+		}
+	}
+	return GateEvidenceHeuristic
+}
+
+// gateChangedPaths is the set of files this change set touches.
+//
+// Test files are included deliberately. A test file the parser could not read is the single most
+// dangerous gap this command has: the test that covers the change may be sitting in it, unparsed,
+// and the resulting UNCOVERED would be an artifact of the parser rather than a finding.
+func gateChangedPaths(result Result) map[string]bool {
+	paths := make(map[string]bool, len(result.Files))
+	for _, file := range result.Files {
+		paths[file.Path] = true
+	}
+	return paths
+}
+
+// gateAnalysisGaps names every way the analysis over this change set was incomplete.
+//
+// Scope is the change set, not the snapshot. A parse failure in a file nothing touched does not
+// make these verdicts partial, and marking it so would widen every command on every run until the
+// flag stopped meaning anything.
+//
+// The residual limitation is stated rather than hidden: reachability walks INBOUND edges, so a
+// caller in an unparsed file elsewhere can still hide a test. That is what the unverified grade on
+// an UNCOVERED verdict already says, and it is why the grade is carried even when Partial is false.
+func gateAnalysisGaps(result Result, snapshot ProviderSnapshot) []GateAnalysisGap {
+	changed := gateChangedPaths(result)
+	gaps := []GateAnalysisGap{}
+	seen := map[string]bool{}
+
+	add := func(path, code, reason string) {
+		key := path + "\x00" + code
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		gaps = append(gaps, GateAnalysisGap{FilePath: path, Code: code, Reason: reason})
+	}
+
+	for _, failure := range snapshot.Header.PartialFailures {
+		if changed[failure.FilePath] {
+			add(failure.FilePath, failure.Code, gateGapReason(failure.EffectOnCompleteness, failure.Detail))
+		}
+	}
+	for _, warning := range snapshot.Header.Warnings {
+		if changed[warning.FilePath] {
+			add(warning.FilePath, warning.Code, gateGapReason(warning.EffectOnCompleteness, warning.Detail))
+		}
+	}
+	for _, file := range snapshot.Files {
+		if !changed[file.Path] {
+			continue
+		}
+		if snapshot.Header.LanguageTiers[file.Language] == "inventory-only" {
+			add(file.Path, GateGapInventoryOnly,
+				file.Language+" is parsed for inventory only: no call relations are emitted for it, so reachability cannot be evaluated")
+		}
+	}
+
+	sort.Slice(gaps, func(left, right int) bool {
+		if gaps[left].FilePath != gaps[right].FilePath {
+			return gaps[left].FilePath < gaps[right].FilePath
+		}
+		return gaps[left].Code < gaps[right].Code
+	})
+	if len(gaps) == 0 {
+		return nil
+	}
+	return gaps
+}
+
+// gateGapReason prefers the provider's completeness note and falls back to its free-text detail.
+func gateGapReason(effect, detail string) string {
+	if effect != "" {
+		return effect
+	}
+	return detail
 }
 
 // --- L3: resolution ---------------------------------------------------------------------------
@@ -294,6 +445,9 @@ func Gate(result Result, snapshot ProviderSnapshot, options GateOptions) GateRes
 		Warnings:               snapshot.Header.Warnings,
 	}
 
+	gate.AnalysisGaps = gateAnalysisGaps(result, snapshot)
+	gate.Partial = len(gate.AnalysisGaps) > 0
+
 	resolution := resolveChangedSymbols(result, snapshot.Symbols)
 
 	reach := gateReachOptions{Depth: options.Depth, MaxFanOut: options.MaxFanOut}
@@ -315,6 +469,7 @@ func Gate(result Result, snapshot ProviderSnapshot, options GateOptions) GateRes
 			Verdict:    gateVerdictFor(tests, hasCallers, resolved.Change.DependentsCount),
 			Tests:      gateSelectedTests(tests),
 			Truncated:  truncated,
+			Evidence:   gateEvidenceFor(tests),
 		})
 	}
 
@@ -380,6 +535,7 @@ func gateSelectedTests(tests []gateReachedTest) []GateSelectedTest {
 			Route:     test.Route,
 			Depth:     test.Depth,
 			Chain:     test.Chain,
+			Evidence:  gateEvidenceForRoute(test.Route),
 		})
 	}
 	return selected
