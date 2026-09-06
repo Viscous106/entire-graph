@@ -338,6 +338,11 @@ func writeGateText(out io.Writer, result sem.GateResult) {
 			result.SkippedTestFileChanges)
 	}
 
+	if result.SkippedNonCallableChanges > 0 {
+		fmt.Fprintf(out, "  (%d change(s) to entities nothing can call excluded: headings, fenced blocks, config keys)\n",
+			result.SkippedNonCallableChanges)
+	}
+
 	if !result.TestsRelationAvailable {
 		fmt.Fprintf(out, "  note: this snapshot carries no TESTS relation (profile %s); "+
 			"attribution used call edges and naming conventions only\n", termsafe.Line(result.Profile))

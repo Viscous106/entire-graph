@@ -711,3 +711,130 @@ func TestGateFullyResolvedResultIsUnchangedByTheRevision(t *testing.T) {
 		t.Errorf("changed symbol\n got %+v\nwant %+v", got.Changed[0], want)
 	}
 }
+
+// --- Noise filter: entities that cannot be called ---------------------------------------------
+//
+// The markdown and config fallback parsers emit "section" and "code_fence" entities — headings,
+// fenced blocks, YAML and JSON keys. Nothing can call one, so no test can ever reach one, and
+// every such change lands as a permanent ISOLATED entry. Running gate over a commit that touched
+// one documentation file produced ten of them, burying the real findings.
+//
+// They are counted rather than dropped silently, so the total still reconciles with the diff —
+// the same rule already applied to changes inside test files.
+
+func TestGateExcludesEntitiesThatCannotBeCalled(t *testing.T) {
+	t.Parallel()
+
+	result := Result{
+		Base: "main", Head: "HEAD",
+		Files: []FileChange{
+			{Path: "README.md", Status: "M", Changes: []EntityChange{
+				{Type: "BODY_CHANGED", Kind: "section", Name: "Installation"},
+				{Type: "ADDED", Kind: "code_fence", Name: "code_fence_1_text"},
+			}},
+			{Path: "store.go", Status: "M", Changes: []EntityChange{
+				{Type: "BODY_CHANGED", Kind: "method", Name: "Store.Put", DependentsCount: 12},
+			}},
+		},
+	}
+	symbols := append(gateFixtureSymbols(),
+		SymbolRecord{ID: "sym-readme-install", Kind: "section", Name: "Installation", FilePath: "README.md", StartLine: 3},
+		SymbolRecord{ID: "sym-readme-fence", Kind: "code_fence", Name: "code_fence_1_text", FilePath: "README.md", StartLine: 9},
+	)
+	snapshot := ProviderSnapshot{
+		Header:  SnapshotHeader{Profile: "full", RelationSet: []string{"CALLS", "TESTS"}},
+		Symbols: symbols,
+	}
+
+	got := Gate(result, snapshot, GateOptions{})
+
+	if len(got.Changed) != 1 {
+		t.Fatalf("expected only the callable change to be verdicted, got %d: %+v", len(got.Changed), got.Changed)
+	}
+	if got.Changed[0].Name != "Store.Put" {
+		t.Errorf("verdicted %q, want Store.Put", got.Changed[0].Name)
+	}
+	if got.SkippedNonCallableChanges != 2 {
+		t.Errorf("skipped non-callable count %d, want 2", got.SkippedNonCallableChanges)
+	}
+}
+
+// The filter must not swallow real code. Every kind that can participate in a call relation stays.
+func TestGateKeepsCallableKinds(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range []string{"function", "method", "type", "field", "class"} {
+		if gateNonCallableKind(kind) {
+			t.Errorf("kind %q was treated as non-callable", kind)
+		}
+	}
+	for _, kind := range []string{"section", "code_fence"} {
+		if !gateNonCallableKind(kind) {
+			t.Errorf("kind %q must be treated as non-callable", kind)
+		}
+	}
+}
+
+// A gap only matters if it can affect a verdict. When every change in a file was excluded — a
+// markdown file whose headings nothing can call — that file's tier or parse state says nothing
+// about the Go verdicts beside it, and marking the run partial would widen the command on every
+// commit that touched a doc. The flag has to stay expensive to trigger or it stops meaning
+// anything.
+//
+// Test files are the deliberate exception: a test file the parser could not read may hold the very
+// test that covers the change, so its gap still counts even though its own changes are skipped.
+func TestGateIgnoresAGapInAFileWhoseChangesWereAllExcluded(t *testing.T) {
+	t.Parallel()
+
+	result := Result{
+		Base: "main", Head: "HEAD",
+		Files: []FileChange{
+			{Path: "README.md", Status: "M", Changes: []EntityChange{
+				{Type: "BODY_CHANGED", Kind: "section", Name: "Installation"},
+			}},
+			{Path: "store.go", Status: "M", Changes: []EntityChange{
+				{Type: "BODY_CHANGED", Kind: "method", Name: "Store.Put", DependentsCount: 12},
+			}},
+		},
+	}
+	snapshot := gateCoveredSnapshotFixture()
+	snapshot.Files = []FileRecord{{Path: "store.go", Language: "Go"}, {Path: "README.md", Language: "Markdown"}}
+	snapshot.Header.LanguageTiers = map[string]string{"Go": "semantic", "Markdown": "inventory-only"}
+	snapshot.Symbols = append(snapshot.Symbols,
+		SymbolRecord{ID: "sym-readme-install", Kind: "section", Name: "Installation", FilePath: "README.md", StartLine: 3})
+
+	got := Gate(result, snapshot, GateOptions{})
+
+	if got.Partial {
+		t.Errorf("a doc-only gap must not mark the Go verdicts partial, gaps %+v", got.AnalysisGaps)
+	}
+}
+
+// The test-file exception, asserted separately so the rule above cannot be over-applied.
+func TestGateKeepsAGapInAChangedTestFile(t *testing.T) {
+	t.Parallel()
+
+	result := Result{
+		Base: "main", Head: "HEAD",
+		Files: []FileChange{
+			{Path: "store_test.go", Status: "M", Changes: []EntityChange{
+				{Type: "BODY_CHANGED", Kind: "function", Name: "TestStorePut"},
+			}},
+			{Path: "store.go", Status: "M", Changes: []EntityChange{
+				{Type: "BODY_CHANGED", Kind: "method", Name: "Store.Put", DependentsCount: 12},
+			}},
+		},
+	}
+	snapshot := gateCoveredSnapshotFixture()
+	snapshot.Files = []FileRecord{{Path: "store.go", Language: "Go"}}
+	snapshot.Header.PartialFailures = []PartialFailure{{
+		Code: "E_PARSE_ERROR", FilePath: "store_test.go",
+		EffectOnCompleteness: "file parsed with syntax errors",
+	}}
+
+	got := Gate(result, snapshot, GateOptions{})
+
+	if !got.Partial {
+		t.Error("a parse error in a changed test file must still mark the result partial: it may hold the covering test")
+	}
+}

@@ -93,14 +93,91 @@ Findings from using Graph on this repository during the build:
 - **Snapshot scale.** 723 files, 8,242 symbols, 10,069 `CALLS` edges.
 - **The one-hop limit is real and load-bearing.** Confirmed at `internal/sem/search_covertest.go:456`. This is what makes L4's transitive walk an addition to Graph rather than a repackaging of `search`.
 - **L5 is not reachable from `internal/cli`.** `searchTestNameShaped` (`internal/sem/search_covertest.go:587`) and `searchTestArtifactPath` (`internal/sem/search.go:4873`) are unexported; only renderers are exported (`RenderSearchCoverageNote` at `internal/sem/search_covertest.go:387`, `RenderSearchVerifyCommand` at `internal/sem/search_verify.go:1274`). This finding, from a `graph search` before writing any code, is why the engine lives in `internal/sem` rather than `internal/cli`.
-- **`TESTS` edges exist only at profile `full`.** So `gate` defaults to `full`, not `search`'s `fast` (`internal/cli/gate.go:22-28`), and reports `tests_relation_available` when the relation is missing (`internal/sem/gate.go:125-129`, rendered at `internal/cli/gate.go:213-216`).
+- **`TESTS` edges exist only at profile `full`.** So `gate` defaults to `full`, not `search`'s `fast` (`internal/cli/gate.go:22-28`), and reports `tests_relation_available` when the relation is missing (`internal/sem/gate.go:144-148`, rendered at `internal/cli/gate.go:341-343`).
 - **Verified reuse points**, each re-checked against the working tree rather than assumed: `sem.AnalyzeGitRange` (`internal/sem/analyze.go:27`), `sem.AnalyzeGitRangeWithOptions` (`internal/sem/analyze.go:72`), `sem.AnalyzeCheckpoint` (`internal/sem/analyze.go:1159`), `buildImpactResponseFromReader` (`internal/cli/impact.go:330`), `buildSearchVerifyCommand` (`internal/sem/search_verify.go:205`), the depth-bounded frontier shape at `internal/cli/impact.go:504-567`.
 
-Verification performed: `go test ./internal/sem/ -run TestGate` and `go test ./internal/cli/ -run TestGate` both pass. The `sem` suite covers resolution (same-file resolution, not-found, ambiguous, module-scope), each of the three verdicts, the dependents-disagree tie-break, deterministic ordering, and the missing-`TESTS`-relation report. The `cli` suite covers command composition, de-duplication, skipping names `go test -run` cannot match, and the empty case.
+Verification performed: `go test ./internal/sem/ -run 'TestGate|TestReach'` (45 tests) and `go test ./internal/cli/ -run TestGate` (14 tests) both pass. The `sem` suite covers resolution (same-file, qualified-name, not-found, ambiguous, module-scope), each of the three verdicts, the dependents-disagree tie-break, deterministic ordering, the missing-`TESTS`-relation report, the transitive reachability walk (depth-2, cycles, self-edges, fan-out truncation, non-test callers), and — after the Curveball — evidence grading, partial-analysis detection, the additive-behaviour regression, and a real unparseable-repository fixture. The `cli` suite covers command composition, de-duplication, skipping names `go test -run` cannot match, the empty case, `--run` adjudication, and the widened fallback with its reason.
 
 ## Noon Curveball: what changed and how we adapted
 
-TO BE COMPLETED AFTER 12:00
+**The constraint.** Do not present incomplete Graph relationships as certain; identify when analysis
+may be partial; offer a safe fallback or verification path; keep existing behaviour working for
+fully resolved code; ship a test or fixture representing incomplete analysis.
+
+**The assumption it invalidated.** `gate` assumed **the absence of an edge is a fact about the
+code**. It is a fact about what static analysis resolved. That assumption was load-bearing in two
+opposite directions. `UNCOVERED` asserted absence as a finding about the repository, when the
+evidence only supports "no test reaches this along a path the resolver could follow". And `COVERED`
+flattened three unequal evidence classes into one verdict: a resolved `CALLS`/`TESTS` edge, a mirror
+test filename, and a name that mentions the symbol. `GateSelectedTest.Route` recorded which route
+fired, but `GateVerdict` did not, so a convention match and a resolver-confirmed call rendered
+identically. Both are the same error — treating the graph as an oracle rather than as evidence with
+a provenance.
+
+The full statement is `docs/buildathon/CURVEBALL.md`, **written before any code changed**.
+
+**Graph analysis ran before implementation, and decided the design.** `entire graph impact` over
+`gateVerdictFor`, `gateReach` and `Gate` was captured to `docs/buildathon/curveball-impact.txt` and
+committed as `3ce7209` **before the first line of implementation existed**. It settled three things:
+
+- *Ownership.* `gateReach`'s callees include `gateReachRoute`, which already emits
+  `edge`/`mirror`/`name`, and its type consumers show it `RETURNS_TYPE gateReachedTest` — a type
+  declared on our side of the seam. The evidence classes were already produced and already crossing
+  the seam, so grading is a pure function of data `gate.go` already receives. **`gate_reach.go`, the
+  other author's file, was never touched.**
+- *Regression surface.* `gateVerdictFor` has 5 direct and 5 transitive callers, 8 of them tests.
+  That made "additive, not a rewrite" a measured constraint. `gateVerdictFor` ended up unmodified.
+- *Precedent for partiality.* `Gate` already called `gateRelationAdvertised` to read
+  `snapshot.Header.RelationSet`, so reading `PartialFailures` and `LanguageTiers` extends an
+  existing pattern rather than inventing one.
+
+**The revision, additive in five points.**
+
+1. **Every claim is graded.** `confirmed` (a resolved edge), `heuristic` (mirror or name
+   convention), `unverified` (a claim resting on absence) — carried per selected test and aggregated
+   per changed symbol, in both text and JSON (`internal/sem/gate.go:187-231`).
+2. **Partial analysis is detected.** `Header.PartialFailures`, `Header.Warnings` and inventory-only
+   language tiers are read and scoped to the files the change set touches; a changed file the parser
+   could not fully handle marks the result partial and names the reason
+   (`internal/sem/gate.go:255-307`).
+3. **The fallback widens.** When analysis is partial, or a symbol's only evidence is heuristic, the
+   emitted command widens from `-run '^(A|B)$'` to the changed packages and says why
+   (`internal/cli/gate.go:263-316`). A narrow command derived from incomplete evidence is the
+   dangerous output: it looks authoritative and silently skips what the resolver missed.
+4. **Fully resolved code is unchanged.** Asserted, not assumed, by
+   `TestGateFullyResolvedResultIsUnchangedByTheRevision` (`internal/sem/gate_test.go`) and
+   `TestGateVerifyCommandIsUnchangedForFullyResolvedCode` (`internal/cli/gate_test.go`).
+5. **A fixture for incomplete analysis**, built as a real repository parsed by the real provider.
+   Two assumptions were checked against the provider before it was written and one was wrong:
+   interface dispatch is **over**-approximated here (`Save -> Putter.Put` *and* `Save -> Store.Put`),
+   not missed, so a fixture claiming interface dispatch hides the call would have asserted something
+   false. The fixture uses the real incompleteness instead — a test file with a syntax error, where
+   the provider still records `TestStorePut` as a symbol while the `CALLS TestStorePut -> Store.Put`
+   edge is destroyed, leaving only the mirror-filename convention.
+
+**What it does on real code.** On `4afea0a..4172fb3`, five changed symbols that were five identical
+`COVERED` verdicts now separate by evidence class:
+
+```
+COVERED   fileRelationScan              provider.go:4486               [heuristic]   24 tests, all mirror
+COVERED   runIndexedStreamingPipeline   provider_parallel_stream.go:14 [confirmed]    2 tests, both edge
+COVERED   slot                          provider_parallel_stream.go:31 [heuristic]
+COVERED   values                        provider_parallel_stream.go:32 [heuristic]
+COVERED   result                        provider_parallel_stream.go:33 [heuristic]
+
+VERIFY: go test ./internal/sem/
+  widened: the only evidence for fileRelationScan is a naming convention, not a resolved call,
+           so a narrow selection asserts more than the graph found
+```
+
+One symbol has structural evidence; four rest on filename and identifier conventions. Among
+`values`'s selections was `TestParseDiffFlagsRequiresRevisionValues` in `internal/cli/root_test.go`,
+admitted because its name contains "values". The tool now says so instead of implying a call.
+
+**Why the new result is safe.** It distinguishes what was *resolved* from what was *inferred from
+silence*, and it degrades toward running more tests rather than fewer. A wrong `UNCOVERED` now costs
+the reader a source check they were told to make; before, it cost them a false assurance they had no
+reason to doubt.
 
 ## Checkpoint links and what each checkpoint proves
 
@@ -151,12 +228,13 @@ Opted in and authenticated, but **not used in the submitted feature**. Nothing i
 
 Stated plainly, because a coverage tool that overstates itself is worse than none.
 
-- **Static call resolution is heuristic.** Interface dispatch, reflection, table-driven registration and generated code can all hide a real test-to-symbol path. `UNCOVERED` means *"no path the graph can see"* — a prompt to check, never a proof that the symbol is untested (`internal/sem/gate.go:243-245`).
+- **Static call resolution is heuristic.** Interface dispatch, reflection, table-driven registration and generated code can all hide a real test-to-symbol path. `UNCOVERED` means *"no path the graph can see"* — a prompt to check, never a proof that the symbol is untested (`internal/sem/gate.go:406-409`).
 - **Test selection is not coverage measurement.** A test that reaches a changed symbol may not assert anything about the changed behaviour. Reachability bounds what *can* break; it does not confirm what *is* checked.
-- **Go-only command emission in v1.** `gateGoTestCommand` (`internal/cli/gate.go:178`) emits `go test -run`. Other toolchains get the full analysis — verdicts, evidence chains, gaps — but no runnable command. Names `go test -run` cannot match are dropped rather than emitted, because a command that silently selects nothing reads exactly like a green run of everything (`internal/cli/gate.go:171-177`).
+- **Go-only command emission in v1.** `gateGoTestCommand` (`internal/cli/gate.go:241`) emits `go test -run`. Other toolchains get the full analysis — verdicts, evidence chains, gaps — but no runnable command. Names `go test -run` cannot match are dropped rather than emitted, because a command that silently selects nothing reads exactly like a green run of everything (`internal/cli/gate.go:236-240`).
 - **`TESTS` edges require profile `full`.** At other profiles one of the three evidence routes is missing; the output says so via `tests_relation_available` rather than degrading quietly.
-- **Fan-out is capped** at 512 inbound edges per level (`internal/sem/gate.go:64`). When the cap bites, the result is marked `Truncated` and the text renderer prints a warning (`internal/cli/gate.go:238-240`) — a shortened list that did not say it was shortened would read as "no more tests exist".
-- **L4 is the in-flight layer.** `gateReach` (`internal/sem/gate_reach.go`) is the transitive walk and test-attribution step; until it returns selections, every resolved symbol falls through to `UNCOVERED` or `ISOLATED`. L3, L6, L7 and L9 are complete and tested.
+- **Fan-out is capped** at 512 inbound edges per level (`internal/sem/gate.go:64`). When the cap bites, the result is marked `Truncated` and the text renderer prints a warning (`internal/cli/gate.go:375-377`) — a shortened list that did not say it was shortened would read as "no more tests exist".
+- **Partiality is scoped to the files the change set touches.** Reachability walks *inbound* edges, so a parse failure in an unchanged file elsewhere can still hide a caller. That case is not marked `partial` — but it is not silent either: the verdict still carries `unverified` or `heuristic`, and heuristic-only evidence widens the command on its own. The tool degrades toward running more tests, never fewer.
+- **A second pre-existing failure surfaces only in a full-package run**: `TestCollidingRepoKeysDoNotShareCacheEntries` passes under `-run` in isolation but fails as part of `go test ./internal/cli/`, which points at cross-test interference over a shared cache directory rather than at the assertion itself. Verified unrelated to this work by running the full package against `01520bf`, the commit before the Curveball revision, where it fails identically. Not investigated further — it is upstream's and outside this feature.
 - **A pre-existing upstream test fails on our machine**: `TestDoctorWorksOutsideGitRepo`. Outside a git repository, `doctor` reports `repo_root=<temp dir>` where the test expects `<unset>`. Verified unrelated to this work by deleting our files and re-running on a pristine tree. It will appear in `go test ./...` on a comparable machine.
 
-**Next steps:** finish L4 and wire L8 (`--run`, adjudicated verdict — `runVerifyCommands` is pure reuse); add the `--checkpoint` claim-versus-reach lens that raises `UNDECLARED REACH` when a checkpoint's stated intent does not mention a region the change actually reaches; per-language command emitters beyond Go; and a co-change lens for invisible coupling — files that change together with no static `CALLS` edge between them.
+**Next steps:** L4 (transitive reachability) and L8 (`--run`, adjudicated verdict) both shipped. Next: widen partiality detection to files holding selected tests, not only changed files; add the `--checkpoint` claim-versus-reach lens that raises `UNDECLARED REACH` when a checkpoint's stated intent does not mention a region the change actually reaches; per-language command emitters beyond Go; and a co-change lens for invisible coupling — files that change together with no static `CALLS` edge between them.

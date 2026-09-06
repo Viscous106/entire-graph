@@ -150,6 +150,10 @@ type GateResult struct {
 	// that needs a test written for it, so verdicting one would bury the real findings in noise.
 	// It is counted rather than dropped silently, so the total still reconciles with the diff.
 	SkippedTestFileChanges int `json:"skipped_test_file_changes,omitempty"`
+	// SkippedNonCallableChanges counts changes to entities nothing can call — markdown headings
+	// and fenced blocks, YAML and JSON keys. No test can reach one, so verdicting them produces
+	// permanent ISOLATED noise that buries the real findings. Counted, not silently dropped.
+	SkippedNonCallableChanges int `json:"skipped_non_callable_changes,omitempty"`
 	// Partial is true when the analysis behind these verdicts was incomplete over the files this
 	// change set touches. It does not mean a verdict is wrong; it means the input the verdict was
 	// computed from was not whole, so no verdict here may be read as certain.
@@ -179,6 +183,22 @@ type gateReachedTest struct {
 	Route  string
 	Depth  int
 	Chain  []string
+}
+
+// gateNonCallableKind reports whether an entity kind can never participate in a call relation.
+//
+// These are the fallback parsers' structural kinds: "section" covers markdown headings and YAML
+// and JSON keys, "code_fence" covers fenced blocks, "setting" covers configuration entries. The
+// list is a deny-list rather than an allow-list of callable kinds on purpose — the provider emits
+// language-specific kinds across more than twenty languages, and a missing entry in an allow-list
+// would silently discard real code, which is a far worse failure than letting one heading through.
+func gateNonCallableKind(kind string) bool {
+	switch kind {
+	case "section", "code_fence", "setting":
+		return true
+	default:
+		return false
+	}
 }
 
 // --- Curveball: evidence grading ---------------------------------------------------------------
@@ -230,30 +250,41 @@ func gateEvidenceFor(tests []gateReachedTest) GateEvidence {
 	return GateEvidenceHeuristic
 }
 
-// gateChangedPaths is the set of files this change set touches.
+// gateGapRelevantPaths is the set of files whose analysis state can actually affect a verdict.
 //
-// Test files are included deliberately. A test file the parser could not read is the single most
-// dangerous gap this command has: the test that covers the change may be sitting in it, unparsed,
-// and the resulting UNCOVERED would be an artifact of the parser rather than a finding.
-func gateChangedPaths(result Result) map[string]bool {
-	paths := make(map[string]bool, len(result.Files))
+// Two kinds of file qualify. First, any file that produced a verdicted symbol: a gap there is a gap
+// in the evidence behind an answer being reported. Second, any changed test file, even though its
+// own changes are skipped — a test file the parser could not read is the single most dangerous gap
+// this command has, because the test that covers the change may be sitting in it unparsed, and the
+// resulting UNCOVERED would be an artifact of the parser rather than a finding.
+//
+// A file whose changes were all excluded as non-callable does NOT qualify. A markdown file is
+// inventory-only by definition, so counting it would mark the run partial on every commit that
+// touched a doc, and a flag that fires constantly stops carrying information.
+func gateGapRelevantPaths(result Result, verdicted []GateChangedSymbol) map[string]bool {
+	paths := make(map[string]bool, len(verdicted))
+	for _, changed := range verdicted {
+		paths[changed.FilePath] = true
+	}
 	for _, file := range result.Files {
-		paths[file.Path] = true
+		if searchTestArtifactPath(searchLowerPath(file.Path)) {
+			paths[file.Path] = true
+		}
 	}
 	return paths
 }
 
 // gateAnalysisGaps names every way the analysis over this change set was incomplete.
 //
-// Scope is the change set, not the snapshot. A parse failure in a file nothing touched does not
-// make these verdicts partial, and marking it so would widen every command on every run until the
-// flag stopped meaning anything.
+// Scope is the files that can affect a verdict, not the whole snapshot. A parse failure in a file
+// nothing touched does not make these verdicts partial, and marking it so would widen every command
+// on every run until the flag stopped meaning anything.
 //
 // The residual limitation is stated rather than hidden: reachability walks INBOUND edges, so a
 // caller in an unparsed file elsewhere can still hide a test. That is what the unverified grade on
 // an UNCOVERED verdict already says, and it is why the grade is carried even when Partial is false.
-func gateAnalysisGaps(result Result, snapshot ProviderSnapshot) []GateAnalysisGap {
-	changed := gateChangedPaths(result)
+func gateAnalysisGaps(relevant map[string]bool, snapshot ProviderSnapshot) []GateAnalysisGap {
+	changed := relevant
 	gaps := []GateAnalysisGap{}
 	seen := map[string]bool{}
 
@@ -445,15 +476,16 @@ func Gate(result Result, snapshot ProviderSnapshot, options GateOptions) GateRes
 		Warnings:               snapshot.Header.Warnings,
 	}
 
-	gate.AnalysisGaps = gateAnalysisGaps(result, snapshot)
-	gate.Partial = len(gate.AnalysisGaps) > 0
-
 	resolution := resolveChangedSymbols(result, snapshot.Symbols)
 
 	reach := gateReachOptions{Depth: options.Depth, MaxFanOut: options.MaxFanOut}
 	for _, resolved := range resolution.Resolved {
 		if searchTestArtifactPath(searchLowerPath(resolved.Path)) {
 			gate.SkippedTestFileChanges++
+			continue
+		}
+		if gateNonCallableKind(resolved.Change.Kind) || gateNonCallableKind(resolved.Symbol.Kind) {
+			gate.SkippedNonCallableChanges++
 			continue
 		}
 		tests, hasCallers, truncated := gateReach(
@@ -476,6 +508,10 @@ func Gate(result Result, snapshot ProviderSnapshot, options GateOptions) GateRes
 	for _, unresolved := range resolution.Unresolved {
 		if searchTestArtifactPath(searchLowerPath(unresolved.Path)) {
 			gate.SkippedTestFileChanges++
+			continue
+		}
+		if gateNonCallableKind(unresolved.Change.Kind) {
+			gate.SkippedNonCallableChanges++
 			continue
 		}
 		gate.Unresolved = append(gate.Unresolved, GateUnresolved{
@@ -504,6 +540,10 @@ func Gate(result Result, snapshot ProviderSnapshot, options GateOptions) GateRes
 		}
 		return gate.Unresolved[left].Name < gate.Unresolved[right].Name
 	})
+
+	// Gaps are computed last because relevance depends on which files actually produced a verdict.
+	gate.AnalysisGaps = gateAnalysisGaps(gateGapRelevantPaths(result, gate.Changed), snapshot)
+	gate.Partial = len(gate.AnalysisGaps) > 0
 
 	return gate
 }

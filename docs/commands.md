@@ -49,6 +49,7 @@ other query commands use; details are in the
 | `diff --base A --head B` | The same between two refs. `analyze` is an alias of `diff`. |
 | `checkpoint <id>` | Analyzes the commit behind an Entire-Checkpoint trailer. |
 | `verify` | Runs a caller-provided test command and returns an adjudicated verdict. This executes the command you pass it; see [trust and security](trust-and-security.md). |
+| `gate` | Which tests reach a change set, and which changed symbols no test reaches. Takes `--base`/`--head` or `--checkpoint`, resolves each changed entity to a symbol, walks inbound call edges transitively (`--depth 1\|2`, default 2) and emits the narrowest `go test -run` for the selection. Verdicts are `COVERED`/`UNCOVERED`/`ISOLATED`, each graded `confirmed` (a resolved edge), `heuristic` (a mirror or name convention) or `unverified` (a claim resting on absence). When analysis over the changed files is partial, or a symbol's only evidence is heuristic, the command widens to the changed packages and says why. Defaults to `--profile full`, because only that profile emits `TESTS` edges. `--run` executes the selection through `verify`. |
 
 ## Export
 
