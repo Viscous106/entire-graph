@@ -150,6 +150,11 @@ type GateResult struct {
 	// that needs a test written for it, so verdicting one would bury the real findings in noise.
 	// It is counted rather than dropped silently, so the total still reconciles with the diff.
 	SkippedTestFileChanges int `json:"skipped_test_file_changes,omitempty"`
+	// SkippedNonTestSelections counts symbols that attribution admitted but that are not reportable
+	// as tests: helpers defined inside a test file, reached by a naming convention rather than a
+	// resolved edge. Counted rather than dropped silently, so a reader can see that the file was
+	// considered and what came of it.
+	SkippedNonTestSelections int `json:"skipped_non_test_selections,omitempty"`
 	// SkippedNonCallableChanges counts changes to entities nothing can call — markdown headings
 	// and fenced blocks, YAML and JSON keys. No test can reach one, so verdicting them produces
 	// permanent ISOLATED noise that buries the real findings. Counted, not silently dropped.
@@ -199,6 +204,34 @@ func gateNonCallableKind(kind string) bool {
 	default:
 		return false
 	}
+}
+
+// gateReportableTests keeps only the selections that can actually be checked by a reader.
+//
+// Attribution admits any symbol whose path is a test artifact, so a fixture helper inside a test
+// file arrives looking like a test case. Running against a JavaScript repository selected `faker`
+// from `tests/pat-info.test.js` as the covering "test" for a changed handler. Sending a reader
+// there to verify a verdict is sending them somewhere that cannot verify anything.
+//
+// A convention route (mirror, name) must therefore also satisfy the name convention: without it,
+// the only claim left is "a symbol in a nearby file", which is evidence about the FILE and not
+// about which of its symbols exercises this change — the same bar searchCoveringTestScore applies.
+// A resolved edge is kept whatever the name, because the graph saw the call, and a helper that
+// really calls the anchor is real evidence that test code exercises it.
+func gateReportableTests(tests []gateReachedTest) ([]gateReachedTest, int) {
+	reportable := make([]gateReachedTest, 0, len(tests))
+	dropped := 0
+	for _, test := range tests {
+		if test.Route != gateRouteEdge && !searchTestNameShaped(test.Symbol.Name) {
+			dropped++
+			continue
+		}
+		reportable = append(reportable, test)
+	}
+	if len(reportable) == 0 {
+		return nil, dropped
+	}
+	return reportable, dropped
 }
 
 // --- Curveball: evidence grading ---------------------------------------------------------------
@@ -491,6 +524,10 @@ func Gate(result Result, snapshot ProviderSnapshot, options GateOptions) GateRes
 		tests, hasCallers, truncated := gateReach(
 			resolved.Symbol, snapshot.Relations, symbolsByID, symbolsByFile, reach,
 		)
+		// Filtered before the verdict, not after: reporting COVERED on selections we then refuse
+		// to show would be the same false assurance the evidence grades exist to remove.
+		tests, droppedSelections := gateReportableTests(tests)
+		gate.SkippedNonTestSelections += droppedSelections
 		gate.Changed = append(gate.Changed, GateChangedSymbol{
 			Name:       resolved.Symbol.Name,
 			Kind:       resolved.Symbol.Kind,

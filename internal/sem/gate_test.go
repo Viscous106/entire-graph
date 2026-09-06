@@ -838,3 +838,94 @@ func TestGateKeepsAGapInAChangedTestFile(t *testing.T) {
 		t.Error("a parse error in a changed test file must still mark the result partial: it may hold the covering test")
 	}
 }
+
+// --- Reportable selections ---------------------------------------------------------------------
+//
+// Attribution admits any symbol living in a test-artifact path, so a helper defined inside a test
+// file is selected as though it were a test case. Running gate on a JavaScript repository produced:
+//
+//	COVERED  pat-info  api/status/pat-info.js:141  [heuristic]
+//	  selected:  faker  tests/pat-info.test.js:30  (mirror -> heuristic, depth 1)
+//
+// `faker` is a fixture helper, not a test. Telling a reader to go and check it is telling them to
+// verify a claim against something that cannot verify it, which is the one thing the "let the user
+// verify" requirement rules out.
+//
+// The rule: a CONVENTION route (mirror, name) must also hold the name convention, or it is not
+// evidence at all — it is "a symbol in a nearby file". A resolved edge is kept regardless, because
+// a helper that genuinely calls the anchor is real evidence that test code exercises it.
+
+func TestGateDropsAConventionSelectionThatIsNotTestShaped(t *testing.T) {
+	t.Parallel()
+
+	helper := gateReachedTestFixture()
+	helper.Symbol.Name = "faker"
+	helper.Route = "mirror"
+
+	reportable, dropped := gateReportableTests([]gateReachedTest{helper})
+
+	if len(reportable) != 0 {
+		t.Errorf("kept %+v, want it dropped: a mirror match on a non-test name is not evidence", reportable)
+	}
+	if dropped != 1 {
+		t.Errorf("dropped count %d, want 1", dropped)
+	}
+}
+
+// A resolved edge stands on its own. The graph saw the call; the name convention adds nothing.
+func TestGateKeepsAResolvedEdgeEvenFromAHelper(t *testing.T) {
+	t.Parallel()
+
+	helper := gateReachedTestFixture()
+	helper.Symbol.Name = "faker"
+	helper.Route = "edge"
+
+	reportable, dropped := gateReportableTests([]gateReachedTest{helper})
+
+	if len(reportable) != 1 {
+		t.Errorf("dropped a resolved edge: %+v", reportable)
+	}
+	if dropped != 0 {
+		t.Errorf("dropped count %d, want 0", dropped)
+	}
+}
+
+func TestGateKeepsATestShapedConventionSelection(t *testing.T) {
+	t.Parallel()
+
+	mirror := gateReachedTestFixture()
+	mirror.Route = "mirror"
+
+	reportable, dropped := gateReportableTests([]gateReachedTest{mirror})
+
+	if len(reportable) != 1 || dropped != 0 {
+		t.Errorf("reportable %+v dropped %d, want the TestStorePut selection kept", reportable, dropped)
+	}
+}
+
+// Dropping every selection has to change the verdict. Reporting COVERED on evidence we just
+// refused to show would be the same false assurance the Curveball was about.
+func TestGateVerdictFallsBackWhenEverySelectionWasDropped(t *testing.T) {
+	t.Parallel()
+
+	result := gateResultWithChange("store.go", EntityChange{
+		Type: "BODY_CHANGED", Kind: "method", Name: "Store.Put", DependentsCount: 12,
+	})
+	snapshot := gateCoveredSnapshotFixture()
+	// The only symbol in the mirror file is a helper, reached by convention rather than an edge.
+	snapshot.Relations = nil
+	snapshot.Symbols = append(gateFixtureSymbols(),
+		coverSymbol("sym-faker", "faker", "faker", "function", "store_test.go", 9, 20))
+
+	got := Gate(result, snapshot, GateOptions{})
+
+	if len(got.Changed) != 1 {
+		t.Fatalf("expected 1 changed symbol, got %d", len(got.Changed))
+	}
+	if got.Changed[0].Verdict == GateCovered {
+		t.Errorf("verdict COVERED with no reportable selection: %+v", got.Changed[0])
+	}
+	if got.Changed[0].Evidence != GateEvidenceUnverified {
+		t.Errorf("evidence %q, want %q", got.Changed[0].Evidence, GateEvidenceUnverified)
+	}
+}

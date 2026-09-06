@@ -485,6 +485,11 @@ func writeGateText(out io.Writer, result sem.GateResult, manifests []string) {
 			result.SkippedTestFileChanges)
 	}
 
+	if result.SkippedNonTestSelections > 0 {
+		fmt.Fprintf(out, "  (%d symbol(s) in test files not reportable as tests: helpers matched by convention, not by a resolved call)\n",
+			result.SkippedNonTestSelections)
+	}
+
 	if result.SkippedNonCallableChanges > 0 {
 		fmt.Fprintf(out, "  (%d change(s) to entities nothing can call excluded: headings, fenced blocks, config keys)\n",
 			result.SkippedNonCallableChanges)
