@@ -1,0 +1,88 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "1e82264bcb5a",
+  "session_id": "9cb0ba33-d324-4d06-8e99-b8383fca2cc8",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-06T07:19:00.397467169Z",
+  "branch": "main",
+  "checkpoints_count": 3,
+  "save_step_count": 1,
+  "files_touched": [
+    "docs/buildathon/CHECKPOINT-curveball.md",
+    "internal/cli/gate.go",
+    "internal/cli/gate_test.go",
+    "internal/sem/gate.go",
+    "internal/sem/gate_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-5",
+  "turn_id": "939b2c7b6ad7",
+  "checkpoint_transcript_start": 211,
+  "transcript_lines_at_start": 211,
+  "compact_transcript_start": 35,
+  "token_usage": {
+    "input_tokens": 98,
+    "cache_creation_tokens": 85534,
+    "cache_read_tokens": 7554675,
+    "output_tokens": 46698,
+    "api_call_count": 49
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_016J2Yjkqosp59zX1JZv3ehP",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:test-driven-development"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "939b2c7b6ad7",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 243,
+        "end": 244,
+        "entry_ids": [
+          "bfc4437a-80b1-45c7-93f1-6c962c96958a"
+        ],
+        "tool_use_id": "toolu_016J2Yjkqosp59zX1JZv3ehP"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_016J2Yjkqosp59zX1JZv3ehP"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:test-driven-development",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 5
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-06T07:19:00.264188639Z",
+    "agent_lines": 887,
+    "agent_removed": 10,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 887,
+    "total_lines_changed": 897,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
