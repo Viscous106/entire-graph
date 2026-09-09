@@ -1,0 +1,283 @@
+Final semantic diff analysis of the submitted implementation
+===========================================================
+
+Track 2 (Graph Intelligence) · entire graph gate · 2026-09-06
+
+Required by the participant guide: "a final semantic diff analysis of the submitted
+implementation". Produced by the graph's own change analysis, not by a line diff.
+
+  base  3a2a715   last upstream commit before any Buildathon work
+  head  3e98d8b   the submitted implementation
+
+Command:
+  entire graph diff --repo . --base 3a2a715 --head 3e98d8b --json
+
+SUMMARY
+-------
+  files with semantic changes : 16  (9 Go, 7 docs/other)
+  entity changes total        : 339
+  entity changes in Go code   : 226
+  by type (Go)                : {'added': 223, 'body_changed': 3}
+  by kind (Go)                : {'type': 17, 'field': 76, 'function': 130, 'module': 2, 'method': 1}
+
+HIGHEST-DEPENDENT GO ENTITIES CHANGED
+-------------------------------------
+   1675  added              field      gateToolchain.name
+    817  added              field      GateSelectedTest.FilePath
+    817  added              field      GateChangedSymbol.FilePath
+    817  added              field      GateAnalysisGap.FilePath
+    816  added              field      GateSelectedTest.Name
+    816  added              field      GateChangedSymbol.Name
+    816  added              field      GateUnresolved.Name
+    655  added              field      GateChangedSymbol.Kind
+    655  added              field      GateUnresolved.Kind
+    564  added              field      gateFlags.Run
+    564  body_changed       function   Run
+    546  added              field      GateSelectedTest.StartLine
+
+GO FILES CHANGED, ENTITY BY ENTITY
+----------------------------------
+
+internal/cli/gate.go
+  added              type       gateFlags   (dependents: 1)
+  added              field      gateFlags.Repo   (dependents: 46)
+  added              field      gateFlags.Base   (dependents: 123)
+  added              field      gateFlags.Head   (dependents: 24)
+  added              field      gateFlags.Checkpoint   (dependents: 16)
+  added              field      gateFlags.Format   (dependents: 46)
+  added              field      gateFlags.Profile   (dependents: 264)
+  added              field      gateFlags.Depth   (dependents: 50)
+  added              field      gateFlags.CacheDir   (dependents: 61)
+  added              field      gateFlags.DisableCache   (dependents: 33)
+  added              field      gateFlags.Run   (dependents: 564)
+  added              function   parseGateFlags   (dependents: 1)
+  added              function   runGate   (dependents: 2)
+  added              function   runGateSelection   (dependents: 1)
+  added              function   gateRunnableCommands   (dependents: 2)
+  added              function   gateRunSummary   (dependents: 4)
+  added              type       gateToolchain   (dependents: 3)
+  added              field      gateToolchain.name   (dependents: 1675)
+  added              field      gateToolchain.manifests   (dependents: 11)
+  added              field      gateToolchain.sourceSuffix   (dependents: 2)
+  added              field      gateToolchain.runnable   (dependents: 13)
+  added              field      gateToolchain.narrow   (dependents: 25)
+  added              field      gateToolchain.widened   (dependents: 21)
+  added              function   gatePrefixDirs
+  added              function   gateDetectManifests   (dependents: 4)
+  added              type       gateVerifyPlan   (dependents: 1)
+  added              field      gateVerifyPlan.Toolchain   (dependents: 2)
+  added              field      gateVerifyPlan.Command   (dependents: 116)
+  added              field      gateVerifyPlan.Why   (dependents: 14)
+  added              function   gateVerifyPlans   (dependents: 7)
+  added              function   gateHasManifest   (dependents: 1)
+  added              function   gateChangedFor   (dependents: 1)
+  added              function   gateNarrowCommand   (dependents: 2)
+  added              function   gateWidenReason   (dependents: 1)
+  added              function   gateWidenedCommand   (dependents: 1)
+  added              function   writeGateText   (dependents: 2)
+
+internal/cli/gate_test.go
+  added              function   gateGoNarrow   (dependents: 4)
+  added              function   gateTest   (dependents: 17)
+  added              function   TestGateComposesGoCommandForTheSelectedSet
+  added              function   TestGateGoCommandDeduplicatesTestNames
+  added              function   TestGateGoCommandSkipsNamesGoTestCannotRun
+  added              function   TestGateGoCommandIsEmptyWhenNothingIsRunnable
+  added              function   TestGateRunSummaryReportsPassAndFailCounts
+  added              function   TestGateRunSummaryNamesFailingTests
+  added              function   TestGateRunSummaryFallsBackToExitCodeWhenUnparsed
+  added              function   gateResultWith   (dependents: 6)
+  added              function   gateFirstPlan   (dependents: 6)
+  added              function   TestGateVerifyCommandIsUnchangedForFullyResolvedCode
+  added              function   TestGateVerifyCommandWidensWhenAnalysisIsPartial
+  added              function   TestGateVerifyCommandWidensWhenEvidenceIsOnlyHeuristic
+  added              function   TestGateVerifyCommandWidensToThePackagesThatChanged
+  added              function   gateRenderText   (dependents: 3)
+  added              function   TestGateTextShowsTheEvidenceGrade
+  added              function   TestGateTextGradesAnUncoveredVerdictAsUnverified
+  added              function   TestGateTextExplainsAWidenedVerifyCommand
+  added              function   TestGateVerifyCommandEmitsNothingWhenNoGoPackagesChanged
+  added              function   TestGateVerifyCommandWidensOnlyOverGoPackages
+  added              function   gatePyResult   (dependents: 3)
+  added              function   TestGateEmitsAPytestCommandForAPythonSelection
+  added              function   TestGatePytestCommandWidensToTheChangedDirectories
+  added              function   TestGateEmitsOneCommandPerToolchainInAMixedRepository
+  added              function   TestGateEmitsNoCommandWithoutAManifest
+  added              function   TestGateRunExecutesEveryPlannedCommand
+  added              function   TestGateDetectsManifestsOnDisk
+  added              function   TestGateDetectsNoManifestsInABareTree
+
+internal/cli/help.go
+  body_changed       module     internal/cli/help.go
+
+internal/cli/help_test.go
+  body_changed       module     internal/cli/help_test.go
+
+internal/cli/root.go
+  body_changed       function   Run   (dependents: 564)
+
+internal/sem/gate.go
+  added              type       GateVerdict   (dependents: 3)
+  added              type       GateOptions   (dependents: 20)
+  added              field      GateOptions.Depth   (dependents: 50)
+  added              field      GateOptions.MaxFanOut   (dependents: 9)
+  added              method     GateOptions.withDefaults   (dependents: 1)
+  added              type       GateSelectedTest   (dependents: 16)
+  added              field      GateSelectedTest.SymbolID   (dependents: 71)
+  added              field      GateSelectedTest.Name   (dependents: 816)
+  added              field      GateSelectedTest.FilePath   (dependents: 817)
+  added              field      GateSelectedTest.StartLine   (dependents: 546)
+  added              field      GateSelectedTest.Route   (dependents: 65)
+  added              field      GateSelectedTest.Depth   (dependents: 50)
+  added              field      GateSelectedTest.Chain   (dependents: 12)
+  added              field      GateSelectedTest.Evidence   (dependents: 143)
+  added              type       GateChangedSymbol   (dependents: 20)
+  added              field      GateChangedSymbol.Name   (dependents: 816)
+  added              field      GateChangedSymbol.Kind   (dependents: 655)
+  added              field      GateChangedSymbol.FilePath   (dependents: 817)
+  added              field      GateChangedSymbol.StartLine   (dependents: 546)
+  added              field      GateChangedSymbol.ChangeType   (dependents: 3)
+  added              field      GateChangedSymbol.Dependents   (dependents: 5)
+  added              field      GateChangedSymbol.Verdict   (dependents: 18)
+  added              field      GateChangedSymbol.Tests   (dependents: 34)
+  added              field      GateChangedSymbol.Truncated   (dependents: 19)
+  added              field      GateChangedSymbol.Evidence   (dependents: 143)
+  added              type       GateUnresolved   (dependents: 3)
+  added              field      GateUnresolved.Name   (dependents: 816)
+  added              field      GateUnresolved.Kind   (dependents: 655)
+  added              field      GateUnresolved.Path   (dependents: 313)
+  added              field      GateUnresolved.Reason   (dependents: 178)
+  added              type       GateAnalysisGap   (dependents: 4)
+  added              field      GateAnalysisGap.FilePath   (dependents: 817)
+  added              field      GateAnalysisGap.Code   (dependents: 171)
+  added              field      GateAnalysisGap.Reason   (dependents: 178)
+  added              type       GateResult   (dependents: 19)
+  added              field      GateResult.SchemaVersion   (dependents: 63)
+  added              field      GateResult.Base   (dependents: 123)
+  added              field      GateResult.Head   (dependents: 24)
+  added              field      GateResult.Checkpoint   (dependents: 16)
+  added              field      GateResult.Profile   (dependents: 264)
+  added              field      GateResult.TestsRelationAvailable   (dependents: 4)
+  added              field      GateResult.SkippedTestFileChanges   (dependents: 4)
+  added              field      GateResult.SkippedNonTestSelections   (dependents: 3)
+  added              field      GateResult.SkippedNonCallableChanges   (dependents: 4)
+  added              field      GateResult.Partial   (dependents: 25)
+  added              field      GateResult.AnalysisGaps   (dependents: 11)
+  added              field      GateResult.Changed   (dependents: 25)
+  added              field      GateResult.Unresolved   (dependents: 11)
+  added              field      GateResult.Warnings   (dependents: 108)
+  added              type       gateReachOptions   (dependents: 7)
+  added              field      gateReachOptions.Depth   (dependents: 50)
+  added              field      gateReachOptions.MaxFanOut   (dependents: 9)
+  added              type       gateReachedTest   (dependents: 18)
+  added              field      gateReachedTest.Symbol   (dependents: 117)
+  added              field      gateReachedTest.Route   (dependents: 65)
+  added              field      gateReachedTest.Depth   (dependents: 50)
+  added              field      gateReachedTest.Chain   (dependents: 12)
+  added              function   gateNonCallableKind   (dependents: 2)
+  added              function   gateReportableTests   (dependents: 4)
+  added              type       GateEvidence   (dependents: 8)
+  added              function   gateEvidenceForRoute   (dependents: 2)
+  added              function   gateEvidenceFor   (dependents: 6)
+  added              function   gateGapRelevantPaths   (dependents: 1)
+  added              function   gateAnalysisGaps   (dependents: 1)
+  added              function   gateGapReason   (dependents: 1)
+  added              type       changedSymbol   (dependents: 3)
+  added              field      changedSymbol.Change   (dependents: 6)
+  added              field      changedSymbol.Path   (dependents: 313)
+  added              field      changedSymbol.Symbol   (dependents: 117)
+  added              type       unresolvedChange   (dependents: 3)
+  added              field      unresolvedChange.Change   (dependents: 6)
+  added              field      unresolvedChange.Path   (dependents: 313)
+  added              field      unresolvedChange.Reason   (dependents: 178)
+  added              type       gateResolution   (dependents: 1)
+  added              field      gateResolution.Resolved   (dependents: 19)
+  added              field      gateResolution.Unresolved   (dependents: 11)
+  added              function   resolveChangedSymbols   (dependents: 6)
+  added              function   gateVerdictFor   (dependents: 5)
+  added              function   Gate   (dependents: 19)
+  added              function   gateRelationAdvertised   (dependents: 1)
+  added              function   gateSelectedTests   (dependents: 1)
+
+internal/sem/gate_reach.go
+  added              function   gateReach   (dependents: 4)
+  added              type       gateReachNode   (dependents: 2)
+  added              field      gateReachNode.id   (dependents: 344)
+  added              field      gateReachNode.chain   (dependents: 79)
+  added              function   gateReachChain   (dependents: 1)
+  added              function   gateReachInboundEdges   (dependents: 1)
+  added              function   gateReachDedupe   (dependents: 1)
+  added              function   gateReachExpandable   (dependents: 1)
+  added              function   gateReachIsTest   (dependents: 2)
+  added              function   gateReachMirrorFiles   (dependents: 1)
+  added              function   gateReachRoute   (dependents: 1)
+  added              function   gateReachName   (dependents: 3)
+
+internal/sem/gate_reach_test.go
+  added              function   reachAnchor   (dependents: 15)
+  added              function   reachIndex   (dependents: 2)
+  added              function   reachRun   (dependents: 14)
+  added              function   reachDefaults   (dependents: 12)
+  added              function   reachNames   (dependents: 7)
+  added              function   reachFind   (dependents: 6)
+  added              function   reachDirectFixture   (dependents: 2)
+  added              function   TestReachFindsTestThatCallsTheAnchorDirectly
+  added              function   TestReachDoesNotSelectANonTestCaller
+  added              function   TestReachFindsTestThroughAnIntermediateCall
+  added              function   TestReachRespectsDepthOne
+  added              function   TestReachTerminatesOnACallCycle
+  added              function   TestReachIgnoresASelfEdgeWhenReportingCallers
+  added              function   TestReachReportsCallersWhenDependentsExistButNoTestReaches
+  added              function   TestReachReportsNoCallersWhenNothingCallsTheAnchor
+  added              function   TestReachCountsAnEdgeFromAnUnknownSymbolAsACaller
+  added              function   TestReachReportsTruncationWhenFanOutCapBites
+  added              function   TestReachIsDeterministicAcrossRelationOrder
+  added              function   TestReachSortsResultsByFileThenLine
+  added              function   TestReachLabelsTheMirrorRouteDistinctly
+  added              function   TestReachAcceptsAResolvedTestsEdge
+  added              function   TestReachAcceptsAnAsyncCallEdge
+
+internal/sem/gate_test.go
+  added              function   gateFixtureSymbols   (dependents: 8)
+  added              function   gateResultWithChange   (dependents: 15)
+  added              function   TestGateResolvesChangedEntityToSymbolInSameFile
+  added              function   TestGateReportsUnresolvedChangeExplicitly
+  added              function   TestGateReportsAmbiguousChangeExplicitly
+  added              function   TestGateReportsModuleScopeChangeUnderItsOwnReason
+  added              function   gateReachedTestFixture   (dependents: 8)
+  added              function   TestGateVerdictCoveredWhenATestReaches
+  added              function   TestGateVerdictUncoveredWhenCallersButNoTestReaches
+  added              function   TestGateVerdictIsolatedWhenNothingCallsIt
+  added              function   TestGateVerdictPrefersUncoveredWhenDependentsDisagreeWithGraph
+  added              function   gateSnapshotFixture   (dependents: 4)
+  added              function   TestGateCarriesResolutionAndVerdictIntoTheResult
+  added              function   TestGateOrdersChangedSymbolsDeterministically
+  added              function   TestGateReportsWhenTheTestsRelationIsUnavailable
+  added              function   TestGateResolvesEntityNamedByQualifiedName
+  added              function   TestGateExcludesChangesInsideTestFiles
+  added              function   TestGateGradesAResolvedEdgeAsConfirmed
+  added              function   TestGateGradesAMirrorRouteAsHeuristic
+  added              function   TestGateGradesANameRouteAsHeuristic
+  added              function   TestGateGradesAbsenceOfTestsAsUnverified
+  added              function   TestGateAggregatesToTheStrongestEvidencePresent
+  added              function   gateCoveredSnapshotFixture   (dependents: 8)
+  added              function   TestGateCarriesEvidenceGradeIntoTheResult
+  added              function   TestGateGradesAnUncoveredVerdictAsUnverified
+  added              function   gatePartialSnapshotFixture   (dependents: 2)
+  added              function   TestGateMarksResultPartialWhenAChangedFileFailedToParse
+  added              function   TestGateIgnoresAParseFailureOutsideTheChangeSet
+  added              function   TestGateMarksResultPartialWhenAChangedFileIsInventoryOnly
+  added              function   TestGateIsNotPartialWhenAnalysisIsComplete
+  added              function   gateIncompleteAnalysisRepo   (dependents: 2)
+  added              function   gateIncompleteAnalysisChanges   (dependents: 2)
+  added              function   TestGateMarksARealUnparseableRepositoryAsPartial
+  added              function   TestGateDoesNotPresentAnIncompleteVerdictAsConfirmed
+  added              function   TestGateFullyResolvedResultIsUnchangedByTheRevision
+  added              function   TestGateExcludesEntitiesThatCannotBeCalled
+  added              function   TestGateKeepsCallableKinds
+  added              function   TestGateIgnoresAGapInAFileWhoseChangesWereAllExcluded
+  added              function   TestGateKeepsAGapInAChangedTestFile
+  added              function   TestGateDropsAConventionSelectionThatIsNotTestShaped
+  added              function   TestGateKeepsAResolvedEdgeEvenFromAHelper
+  added              function   TestGateKeepsATestShapedConventionSelection
+  added              function   TestGateVerdictFallsBackWhenEverySelectionWasDropped

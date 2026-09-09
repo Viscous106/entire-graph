@@ -188,6 +188,38 @@ Findings from using Graph on this repository during the build:
 
 Verification performed: `go test ./internal/sem/ -run 'TestGate|TestReach'` (45 tests) and `go test ./internal/cli/ -run TestGate` (14 tests) both pass. The `sem` suite covers resolution (same-file, qualified-name, not-found, ambiguous, module-scope), each of the three verdicts, the dependents-disagree tie-break, deterministic ordering, the missing-`TESTS`-relation report, the transitive reachability walk (depth-2, cycles, self-edges, fan-out truncation, non-test callers), and — after the Curveball — evidence grading, partial-analysis detection, the additive-behaviour regression, and a real unparseable-repository fixture. The `cli` suite covers command composition, de-duplication, skipping names `go test -run` cannot match, the empty case, `--run` adjudication, and the widened fallback with its reason.
 
+## Final semantic diff of the submitted implementation
+
+`docs/buildathon/final-semantic-diff.txt`, produced by the graph's own change analysis rather than
+a line diff:
+
+```
+entire graph diff --repo . --base 3a2a715 --head 3e98d8b --json
+```
+
+`3a2a715` is the last upstream commit before any Buildathon work; `3e98d8b` is the submission.
+
+```
+files with semantic changes : 16  (9 Go, 7 docs/other)
+entity changes in Go code   : 226   (223 added, 3 body_changed)
+by kind                     : 130 function, 76 field, 17 type, 2 module, 1 method
+```
+
+Only three pre-existing entities changed at all, and all three are the wiring a new subcommand
+needs: `body_changed function Run` (the dispatch switch), and `body_changed module`
+on `internal/cli/help.go` and `internal/cli/help_test.go` (the command's help entry). Every other
+one of the 226 Go entity changes is `added`.
+
+That is the independent check on the claim that the Curveball revision was additive. A feature that
+had modified the provider would show `body_changed` across `internal/sem/provider*.go`; the graph's
+own change analysis shows none.
+
+Note the base ref: `3a2a715` predates all Buildathon work, so this diff covers the whole feature,
+including `internal/sem/gate_reach.go` written by the other author. Scoped to the Curveball
+revision alone (`git diff --stat 01520bf..3e98d8b -- internal/sem/gate_reach.go`) that file is
+untouched, which is what the pre-implementation impact analysis in `curveball-impact.txt`
+predicted.
+
 ## Noon Curveball: what changed and how we adapted
 
 **The constraint.** Do not present incomplete Graph relationships as certain; identify when analysis
